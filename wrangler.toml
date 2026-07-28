@@ -8,4 +8,4 @@ crons = ["45 10 * * 1-5"]  # 10:45 UTC = 4:15 PM IST, weekdays only
 [[d1_databases]]
 binding = "DB"
 database_name = "uc-portfolio-db"
-database_id = ""  # Fill after: wrangler d1 create uc-portfolio-db
+database_id = "82c725e5-14cd-4d13-82d5-2ec049319695"
