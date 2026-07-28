@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UC-Portfolio | Momentum Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f1f5f9;--card:#ffffff;--border:#e2e8f0;
+  --text:#1e293b;--text2:#64748b;--text3:#94a3b8;
+  --green:#16a34a;--green-bg:#f0fdf4;--green-border:#bbf7d0;
+  --red:#dc2626;--red-bg:#fef2f2;--red-border:#fecaca;
+  --amber:#d97706;--amber-bg:#fffbeb;--amber-border:#fde68a;
+  --blue:#2563eb;--blue-bg:#eff6ff;--blue-border:#bfdbfe;
+  --radius:12px;--shadow:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);
+  --shadow-lg:0 4px 12px rgba(0,0,0,.08);
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none}
+
+/* Top Bar */
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.topbar-brand{font-weight:700;font-size:18px;letter-spacing:-.5px;color:var(--blue)}
+.topbar-brand span{color:var(--text3);font-weight:400;font-size:13px;margin-left:8px}
+.topbar-metrics{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--text2)}
+.topbar-metrics .val{font-weight:600;color:var(--text)}
+.topbar-metrics .pos{color:var(--green)}.topbar-metrics .neg{color:var(--red)}
+
+/* Tabs */
+.tabs{background:var(--card);border-bottom:1px solid var(--border);padding:0 24px;display:flex;gap:0}
+.tab{padding:12px 20px;font-size:14px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.tab:hover{color:var(--text)}.tab.active{color:var(--blue);border-color:var(--blue)}
+
+/* Layout */
+.container{max-width:1200px;margin:0 auto;padding:20px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}
+.card-title{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:8px;font-weight:600}
+.section-title{font-size:16px;font-weight:600;color:var(--text);margin:28px 0 12px;display:flex;align-items:center;gap:8px}
+.section-title .count{background:var(--blue-bg);color:var(--blue);font-size:12px;padding:2px 8px;border-radius:10px}
+
+/* Hero */
+.hero{text-align:center;padding:32px 20px 24px}
+.hero-amount{font-size:48px;font-weight:700;letter-spacing:-2px;color:var(--text)}
+.hero-return{font-size:20px;font-weight:600;margin-top:4px}
+.hero-sub{font-size:14px;color:var(--text2);margin-top:8px}
+.hero-alpha{display:inline-block;background:var(--green-bg);border:1px solid var(--green-border);color:var(--green);padding:4px 14px;border-radius:20px;font-size:13px;font-weight:600;margin-top:12px}
+
+/* Metric Cards */
+.metric-val{font-size:24px;font-weight:700;letter-spacing:-.5px}
+.metric-label{font-size:13px;color:var(--text2);margin-top:2px}
+.metric-date{font-size:12px;color:var(--text3);margin-top:4px}
+.metric-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:10px}
+
+/* Alerts / Actions */
+.alert-item{display:flex;align-items:flex-start;gap:12px;padding:12px 16px;border-radius:8px;margin-bottom:8px;font-size:13px}
+.alert-item.critical{background:var(--red-bg);border:1px solid var(--red-border)}
+.alert-item.warning{background:var(--amber-bg);border:1px solid var(--amber-border)}
+.alert-item.info{background:var(--blue-bg);border:1px solid var(--blue-border)}
+.alert-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.alert-item.critical .alert-dot{background:var(--red)}
+.alert-item.warning .alert-dot{background:var(--amber)}
+.alert-item.info .alert-dot{background:var(--blue)}
+.alert-symbol{font-weight:600;min-width:80px}
+
+/* Holdings */
+.holdings-table{width:100%;border-collapse:collapse;font-size:13px}
+.holdings-table th{text-align:left;padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);border-bottom:2px solid var(--border);font-weight:600}
+.holdings-table td{padding:10px 12px;border-bottom:1px solid var(--border)}
+.holdings-table tr:last-child td{border-bottom:none}
+.holdings-table tr:hover{background:#f8fafc}
+.holdings-table .sym{font-weight:600}
+.holdings-table .sector-tag{font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg);color:var(--text2)}
+.pnl-bar{height:6px;border-radius:3px;min-width:2px;display:inline-block;vertical-align:middle}
+
+/* Risk Strip */
+.risk-strip{display:flex;gap:6px;flex-wrap:wrap;padding:4px 0}
+.risk-chip{padding:6px 12px;border-radius:6px;font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px}
+.risk-chip .dot{width:6px;height:6px;border-radius:50%}
+.risk-chip.danger{background:var(--red-bg);border:1px solid var(--red-border)}
+.risk-chip.danger .dot{background:var(--red)}
+.risk-chip.warn{background:var(--amber-bg);border:1px solid var(--amber-border)}
+.risk-chip.warn .dot{background:var(--amber)}
+.risk-chip.safe{background:var(--green-bg);border:1px solid var(--green-border)}
+.risk-chip.safe .dot{background:var(--green)}
+
+/* Sector Map */
+.sector-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.sector-box{padding:12px;border-radius:8px;background:var(--bg);text-align:center}
+.sector-box .name{font-size:12px;color:var(--text2);margin-bottom:6px}
+.sector-dots{display:flex;gap:4px;justify-content:center}
+.sector-dot{width:12px;height:12px;border-radius:50%}
+.sector-dot.filled{background:var(--blue)}
+.sector-dot.empty{background:var(--border)}
+
+/* Monthly Returns */
+.month-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:8px}
+.month-box{padding:12px 8px;border-radius:8px;text-align:center;font-weight:600;font-size:14px}
+.month-box .label{font-size:11px;color:var(--text2);font-weight:400;display:block;margin-bottom:4px}
+
+/* Activity Feed */
+.feed-item{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px}
+.feed-item:last-child{border-bottom:none}
+.feed-date{color:var(--text3);min-width:50px;font-size:12px}
+.feed-type{font-weight:600;min-width:40px;font-size:11px;padding:2px 6px;border-radius:4px;text-align:center}
+.feed-type.buy{background:var(--green-bg);color:var(--green)}
+.feed-type.sell{background:var(--red-bg);color:var(--red)}
+.feed-type.stop{background:var(--amber-bg);color:var(--amber)}
+.feed-type.book{background:var(--blue-bg);color:var(--blue)}
+.feed-pnl{margin-left:auto;font-weight:600}
+
+/* Chart container */
+.chart-container{position:relative;height:250px;margin:16px 0}
+
+/* Tab content */
+.tab-content{display:none}.tab-content.active{display:block}
+
+/* Pipeline tab */
+.pipeline-card{display:flex;align-items:center;justify-content:space-between;padding:16px;border-radius:var(--radius);border:1px solid var(--border);background:var(--card);margin-bottom:8px}
+.pipeline-status{font-size:12px;padding:4px 10px;border-radius:12px;font-weight:600}
+.pipeline-status.ready{background:var(--green-bg);color:var(--green)}
+.pipeline-status.blocked{background:var(--amber-bg);color:var(--amber)}
+.pipeline-status.wait{background:var(--bg);color:var(--text2)}
+
+/* Responsive */
+@media(max-width:768px){
+  .grid-4{grid-template-columns:repeat(2,1fr)}
+  .grid-2{grid-template-columns:1fr}
+  .sector-grid{grid-template-columns:repeat(2,1fr)}
+  .topbar{padding:10px 16px}
+  .topbar-metrics{font-size:12px;gap:10px}
+  .container{padding:12px}
+  .hero-amount{font-size:36px}
+  .holdings-table{font-size:12px}
+  .holdings-table th,.holdings-table td{padding:8px 6px}
+  .holdings-table .hide-mobile{display:none}
+  .month-grid{grid-template-columns:repeat(3,1fr)}
+}
+@media(max-width:480px){
+  .grid-4{grid-template-columns:1fr 1fr}
+  .topbar-brand span{display:none}
+  .hero-amount{font-size:30px}
+}
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <div class="topbar-brand">UC-Portfolio <span>Momentum System</span></div>
+  <div class="topbar-metrics">
+    <div>Regime: <span class="val" id="tb-regime">NORMAL</span></div>
+    <div>Brent: <span class="val" id="tb-brent">$87.73</span></div>
+    <div>Freeze: <span class="val pos" id="tb-freeze">OFF</span></div>
+    <div>Updated: <span class="val" id="tb-updated">28-Jul 10:12 AM</span></div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
+  <div class="tab" onclick="switchTab('pipeline')">Pipeline</div>
+  <div class="tab" onclick="switchTab('history')">History</div>
+</div>
+
+<!-- Tab 1: Dashboard -->
+<div class="tab-content active" id="tab-dashboard">
+<div class="container">
+
+  <!-- Hero -->
+  <div class="hero card">
+    <div class="card-title">Net Worth</div>
+    <div class="hero-amount" id="hero-nw">₹7,18,435</div>
+    <div class="hero-return pos" id="hero-return" style="color:var(--green)">+10.5% all-time · +₹68,042</div>
+    <div class="hero-sub">Baseline ₹6,50,393 · Since 20 Mar 2026 (130 days)</div>
+    <div class="hero-alpha" id="hero-alpha">Beating Nifty 500 by 2.4x</div>
+  </div>
+
+  <!-- Four Metric Cards -->
+  <div class="grid-4" style="margin-top:16px">
+    <div class="card">
+      <div class="metric-icon" style="background:var(--green-bg)">📈</div>
+      <div class="card-title">Best Day</div>
+      <div class="metric-val" style="color:var(--green)" id="m-best-val">+₹12,450</div>
+      <div class="metric-label" id="m-best-pct">+1.7% single day</div>
+      <div class="metric-date" id="m-best-date">Jun 15, 2026</div>
+    </div>
+    <div class="card">
+      <div class="metric-icon" style="background:var(--red-bg)">📉</div>
+      <div class="card-title">Worst Day</div>
+      <div class="metric-val" style="color:var(--red)" id="m-worst-val">-₹18,200</div>
+      <div class="metric-label" id="m-worst-pct">-2.5% single day</div>
+      <div class="metric-date" id="m-worst-date">Jul 23, 2026</div>
+    </div>
+    <div class="card">
+      <div class="metric-icon" style="background:var(--blue-bg)">🎯</div>
+      <div class="card-title">Win Rate</div>
+      <div class="metric-val" id="m-winrate">72%</div>
+      <div class="metric-label">8 wins · 3 losses</div>
+      <div class="metric-date">Avg winner +24% · Avg loser -2%</div>
+    </div>
+    <div class="card">
+      <div class="metric-icon" style="background:var(--amber-bg)">⚡</div>
+      <div class="card-title">Capital at Work</div>
+      <div class="metric-val" id="m-deployed">52%</div>
+      <div class="metric-label">11 positions · ₹3.72L deployed</div>
+      <div class="metric-date">₹2.66L cash ready</div>
+    </div>
+  </div>
+
+  <!-- Actions / To Monitor -->
+  <div class="section-title">⚡ Actions & Monitor <span class="count" id="alert-count">6</span></div>
+  <div class="card" id="alerts-container">
+    <div class="alert-item critical">
+      <div class="alert-dot"></div>
+      <div class="alert-symbol">GLENMARK</div>
+      <div>Q1 results Jul 31 (3 days). Decision needed: hold through or exit? Currently -4.8% from entry.</div>
+    </div>
+    <div class="alert-item warning">
+      <div class="alert-dot"></div>
+      <div class="alert-symbol">CHOICEIN</div>
+      <div>+30% milestone profit GTT set at ₹828 for 10 shares. Monitor for trigger.</div>
+    </div>
+    <div class="alert-item warning">
+      <div class="alert-dot"></div>
+      <div class="alert-symbol">AJANTPHARM</div>
+      <div>Giveback: peaked +11.3%, now +4.7%. Surrendered 58% of peak gain. Review momentum.</div>
+    </div>
+    <div class="alert-item info">
+      <div class="alert-dot"></div>
+      <div class="alert-symbol">RADICO</div>
+      <div>Q1 results today. If clean → deploy-ready after 48 hours. MomScore 1.38.</div>
+    </div>
+    <div class="alert-item info">
+      <div class="alert-dot"></div>
+      <div class="alert-symbol">DATAPATTNS</div>
+      <div>Q1 results Jul 30. If clean → deploy-ready Aug 1. MomScore 2.19.</div>
+    </div>
+    <div class="alert-item info">
+      <div class="alert-dot"></div>
+      <div class="alert-symbol">GATE</div>
+      <div>Tranche-2 gate: 2/3. Brent ✅ $87.73 · VIX ✅ 12.66 · Nifty ❌ 23,996 (need 24,300)</div>
+    </div>
+  </div>
+
+  <!-- Holdings -->
+  <div class="section-title">📊 Holdings</div>
+  <div class="card" style="overflow-x:auto">
+    <table class="holdings-table">
+      <thead>
+        <tr>
+          <th>Stock</th>
+          <th class="hide-mobile">Sector</th>
+          <th>Entry</th>
+          <th>LTP</th>
+          <th>P&L</th>
+          <th>Value</th>
+          <th class="hide-mobile">Stage</th>
+          <th>GTT Gap</th>
+        </tr>
+      </thead>
+      <tbody id="holdings-body">
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Risk Strip -->
+  <div class="section-title">🛡️ Distance to Stops</div>
+  <div class="card">
+    <div class="risk-strip" id="risk-strip"></div>
+  </div>
+
+  <!-- Sector Map + Monthly Returns side by side -->
+  <div class="grid-2" style="margin-top:4px">
+    <div>
+      <div class="section-title">🏗️ Sector Map</div>
+      <div class="card">
+        <div class="sector-grid" id="sector-grid"></div>
+      </div>
+    </div>
+    <div>
+      <div class="section-title">📅 Monthly Returns</div>
+      <div class="card">
+        <div class="month-grid" id="month-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Performance Chart -->
+  <div class="section-title">📈 Performance vs Nifty 500</div>
+  <div class="card">
+    <div class="chart-container">
+      <canvas id="perfChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Activity Feed -->
+  <div class="section-title">🕐 Recent Activity</div>
+  <div class="card">
+    <div id="activity-feed"></div>
+  </div>
+
+</div>
+</div>
+
+<!-- Tab 2: Pipeline -->
+<div class="tab-content" id="tab-pipeline">
+<div class="container">
+  <div class="section-title">🎯 Deploy-Ready Candidates</div>
+  <div id="pipeline-ready"></div>
+  <div class="section-title">⏳ Pending Results</div>
+  <div id="pipeline-pending"></div>
+  <div class="section-title">🚫 Recently Rejected</div>
+  <div id="pipeline-rejected"></div>
+</div>
+</div>
+
+<!-- Tab 3: History -->
+<div class="tab-content" id="tab-history">
+<div class="container">
+  <div class="section-title">📋 Trade Log</div>
+  <div class="card" style="overflow-x:auto">
+    <table class="holdings-table" id="trade-log-table">
+      <thead><tr><th>Date</th><th>Type</th><th>Stock</th><th>Qty</th><th>Price</th><th>Value</th><th>P&L</th><th>Reason</th></tr></thead>
+      <tbody id="trade-log-body"></tbody>
+    </table>
+  </div>
+  <div class="grid-2" style="margin-top:16px">
+    <div class="card">
+      <div class="card-title">Cumulative P&L from Closed Trades</div>
+      <div class="chart-container" style="height:200px"><canvas id="pnlChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Trade Statistics</div>
+      <div style="font-size:14px;line-height:2" id="trade-stats"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+// ── DATA (embedded for demo — production fetches from /api/) ──
+const DATA = {
+  netWorth: 718435,
+  baseline: 650393,
+  returnPct: 10.5,
+  niftyReturnPct: 4.3,
+  cashKite: 244051,
+  cashBank: 50000,
+  liquidbees: 52000,
+  regime: 'NORMAL',
+  brent: 87.73,
+  freezeActive: false,
+  vix: 12.66,
+  nifty: 23996,
+  gate: {brent: true, vix: true, nifty: false},
+  bestDay: {amount: 12450, pct: 1.7, date: 'Jun 15, 2026'},
+  worstDay: {amount: -18200, pct: -2.5, date: 'Jul 23, 2026'},
+  winRate: {wins: 8, losses: 3, avgWin: 24.3, avgLoss: -2.1},
+  holdings: [
+    {sym:'CHOICEIN',sector:'Fin Svc',qty:25,entry:637,ltp:803,stage:'PARTIAL_BOOK',gtt:776,gttGap:3.4,day:0.7,isNew:false},
+    {sym:'PIDILITIND',sector:'Chemicals',qty:24,entry:1479,ltp:1619,stage:'CAP_PROTECT',gtt:1517,gttGap:6.3,day:2.9,isNew:false},
+    {sym:'WELCORP',sector:'Cap Goods',qty:47,entry:1521,ltp:1626,stage:'CAP_PROTECT',gtt:1552,gttGap:4.5,day:1.6,isNew:false},
+    {sym:'MARICO',sector:'FMCG',qty:40,entry:815,ltp:865,stage:'RISK_REDUCED',gtt:814,gttGap:5.9,day:0.8,isNew:false},
+    {sym:'AJANTPHARM',sector:'Pharma',qty:18,entry:3212,ltp:3363,stage:'CAP_PROTECT',gtt:3228,gttGap:4.0,day:-0.7,isNew:false},
+    {sym:'RRKABEL',sector:'Cap Goods',qty:15,entry:2605,ltp:2605,stage:'ENTRY_RISK',gtt:2397,gttGap:8.0,day:0,isNew:true},
+    {sym:'GABRIEL',sector:'Auto',qty:28,entry:1412,ltp:1412,stage:'ENTRY_RISK',gtt:1299,gttGap:8.0,day:0,isNew:true},
+    {sym:'NAM-INDIA',sector:'Fin Svc',qty:32,entry:1160,ltp:1151,stage:'ENTRY_RISK',gtt:1067,gttGap:7.3,day:-0.3,isNew:false},
+    {sym:'PREMIERENE',sector:'Solar',qty:35,entry:1072,ltp:1039,stage:'ENTRY_RISK',gtt:1000,gttGap:3.8,day:-0.1,isNew:false},
+    {sym:'LUPIN',sector:'Pharma',qty:14,entry:2501,ltp:2403,stage:'ENTRY_RISK',gtt:2301,gttGap:4.2,day:-0.3,isNew:false},
+    {sym:'GLENMARK',sector:'Pharma',qty:16,entry:2309,ltp:2197,stage:'ENTRY_RISK',gtt:2132,gttGap:3.0,day:0.1,isNew:false},
+  ],
+  sectors: [
+    {name:'Pharma',filled:3,max:3},{name:'Cap Goods',filled:2,max:3},
+    {name:'Fin Svc',filled:2,max:3},{name:'Auto',filled:1,max:3},
+    {name:'FMCG',filled:1,max:3},{name:'Chemicals',filled:1,max:3},
+    {name:'Solar',filled:1,max:3},{name:'Defence',filled:0,max:3},
+  ],
+  monthlyReturns: [
+    {month:'Mar',pct:2.1},{month:'Apr',pct:3.8},{month:'May',pct:4.2},
+    {month:'Jun',pct:3.1},{month:'Jul',pct:-2.6},
+  ],
+  navHistory: [
+    {date:'Mar 20',portfolio:650393,nifty:650393},
+    {date:'Apr 20',portfolio:664000,nifty:658000},
+    {date:'May 20',portfolio:689000,nifty:665000},
+    {date:'Jun 20',portfolio:710000,nifty:672000},
+    {date:'Jul 7',portfolio:740000,nifty:678000},
+    {date:'Jul 20',portfolio:740252,nifty:678000},
+    {date:'Jul 24',portfolio:716963,nifty:670000},
+    {date:'Jul 28',portfolio:718435,nifty:672000},
+  ],
+  trades: [
+    {date:'28-Jul',type:'BUY',sym:'RRKABEL',qty:15,price:2605,value:39074,pnl:0,reason:'8/8, Q1 PAT +129%'},
+    {date:'28-Jul',type:'BUY',sym:'GABRIEL',qty:28,price:1412,value:39522,pnl:0,reason:'8/8, Auto sector open'},
+    {date:'28-Jul',type:'STOP',sym:'AEGISLOG',qty:28,price:1267,value:35479,pnl:-1112,reason:'RISK_REDUCED stop, oil selloff'},
+    {date:'28-Jul',type:'STOP',sym:'INOXINDIA',qty:19,price:1932,value:36711,pnl:1339,reason:'PROFIT_LOCKED graduated ✓'},
+    {date:'27-Jul',type:'BOOK',sym:'CHOICEIN',qty:10,price:802,value:8018,pnl:1648,reason:'+20% milestone catch-up'},
+    {date:'24-Jul',type:'STOP',sym:'ACUTAAS',qty:22,price:3225,value:70950,pnl:90,reason:'Brent tightening whipsaw'},
+    {date:'24-Jul',type:'STOP',sym:'CGPOWER',qty:44,price:864,value:38018,pnl:-425,reason:'Never trailed (error)'},
+    {date:'23-Jul',type:'STOP',sym:'AXISBANK',qty:6,price:1208,value:7248,pnl:3249,reason:'Trailing stop — correct ✓'},
+    {date:'23-Jul',type:'STOP',sym:'OFSS',qty:4,price:10663,value:42652,pnl:-516,reason:'Tight stop, CEO resigned'},
+  ],
+  pipeline: [
+    {sym:'HSCL',sector:'Chemicals',mom:2.23,filters:8,status:'BLOCKED_RSI',note:'RSI 70 — wait pullback',zone:'₹750-780'},
+    {sym:'DATAPATTNS',sector:'Defence',mom:2.19,filters:8,status:'BLOCKED_RESULTS',note:'Results Jul 30',zone:'~₹4,500'},
+    {sym:'RADICO',sector:'Consumer',mom:1.38,filters:8,status:'BLOCKED_RESULTS',note:'Results today',zone:'~₹4,050'},
+  ],
+  rejected: [
+    {sym:'SCHNEIDER',reason:'Traded value ₹58 Cr < ₹75 Cr threshold'},
+    {sym:'KAJARIACER',reason:'Traded value ₹35 Cr < ₹75 Cr threshold'},
+  ]
+};
+
+// ── RENDER FUNCTIONS ──
+function formatINR(n){
+  if(Math.abs(n)>=100000) return '₹'+( n/100000).toFixed(2)+'L';
+  if(Math.abs(n)>=1000) return '₹'+(n/1000).toFixed(1)+'K';
+  return '₹'+n.toFixed(0);
+}
+
+function renderHoldings(){
+  const tbody=document.getElementById('holdings-body');
+  const sorted=[...DATA.holdings].sort((a,b)=>{
+    const pnlA=(a.ltp/a.entry-1)*100, pnlB=(b.ltp/b.entry-1)*100;
+    return pnlB-pnlA;
+  });
+  tbody.innerHTML=sorted.map(h=>{
+    const pnl=((h.ltp/h.entry-1)*100);
+    const val=h.qty*h.ltp;
+    const pnlColor=pnl>=0?'var(--green)':'var(--red)';
+    const barWidth=Math.min(Math.abs(pnl)*3,100);
+    const barColor=pnl>=0?'var(--green)':'var(--red)';
+    const newTag=h.isNew?'<span style="font-size:10px;background:var(--blue-bg);color:var(--blue);padding:1px 5px;border-radius:3px;margin-left:4px">NEW</span>':'';
+    return `<tr>
+      <td class="sym">${h.sym}${newTag}</td>
+      <td class="hide-mobile"><span class="sector-tag">${h.sector}</span></td>
+      <td>₹${h.entry.toLocaleString()}</td>
+      <td>₹${h.ltp.toLocaleString()}</td>
+      <td style="color:${pnlColor};font-weight:600">
+        ${pnl>=0?'+':''}${pnl.toFixed(1)}%
+        <span class="pnl-bar" style="width:${barWidth}px;background:${barColor}"></span>
+      </td>
+      <td>${formatINR(val)}</td>
+      <td class="hide-mobile" style="font-size:11px;color:var(--text2)">${h.stage}</td>
+      <td><span style="color:${h.gttGap<3?'var(--red)':h.gttGap<5?'var(--amber)':'var(--green)'};font-weight:600">${h.gttGap.toFixed(1)}%</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderRiskStrip(){
+  const el=document.getElementById('risk-strip');
+  const sorted=[...DATA.holdings].sort((a,b)=>a.gttGap-b.gttGap);
+  el.innerHTML=sorted.map(h=>{
+    const cls=h.gttGap<3?'danger':h.gttGap<5?'warn':'safe';
+    return `<div class="risk-chip ${cls}"><span class="dot"></span>${h.sym} ${h.gttGap.toFixed(1)}%</div>`;
+  }).join('');
+}
+
+function renderSectors(){
+  const el=document.getElementById('sector-grid');
+  el.innerHTML=DATA.sectors.map(s=>{
+    const dots=Array.from({length:s.max},(_, i)=>`<div class="sector-dot ${i<s.filled?'filled':'empty'}"></div>`).join('');
+    const full=s.filled>=s.max?'<div style="font-size:10px;color:var(--red);margin-top:2px">FULL</div>':'';
+    return `<div class="sector-box"><div class="name">${s.name}</div><div class="sector-dots">${dots}</div>${full}</div>`;
+  }).join('');
+}
+
+function renderMonthly(){
+  const el=document.getElementById('month-grid');
+  el.innerHTML=DATA.monthlyReturns.map(m=>{
+    const bg=m.pct>=3?'var(--green-bg)':m.pct>=0?'#f0fdf4':m.pct>=-2?'var(--amber-bg)':'var(--red-bg)';
+    const color=m.pct>=0?'var(--green)':'var(--red)';
+    return `<div class="month-box" style="background:${bg};color:${color}"><span class="label">${m.month} '26</span>${m.pct>=0?'+':''}${m.pct}%</div>`;
+  }).join('');
+}
+
+function renderActivity(){
+  const el=document.getElementById('activity-feed');
+  el.innerHTML=DATA.trades.slice(0,8).map(t=>{
+    const cls=t.type==='BUY'?'buy':t.type==='BOOK'?'book':t.pnl>=0?'buy':'sell';
+    const pnlStr=t.pnl!==0?(t.pnl>0?`<span style="color:var(--green)">+₹${t.pnl.toLocaleString()}</span>`:`<span style="color:var(--red)">-₹${Math.abs(t.pnl).toLocaleString()}</span>`):'';
+    return `<div class="feed-item">
+      <div class="feed-date">${t.date}</div>
+      <div class="feed-type ${cls}">${t.type}</div>
+      <div><strong>${t.sym}</strong> · ${t.qty}×₹${t.price.toLocaleString()} · <span style="color:var(--text2)">${t.reason}</span></div>
+      <div class="feed-pnl">${pnlStr}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderPerfChart(){
+  const ctx=document.getElementById('perfChart').getContext('2d');
+  new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:DATA.navHistory.map(d=>d.date),
+      datasets:[{
+        label:'UC-Portfolio',data:DATA.navHistory.map(d=>d.portfolio),
+        borderColor:'#2563eb',backgroundColor:'rgba(37,99,235,.08)',fill:true,tension:.3,pointRadius:3,borderWidth:2
+      },{
+        label:'Nifty 500 (rebased)',data:DATA.navHistory.map(d=>d.nifty),
+        borderColor:'#94a3b8',backgroundColor:'transparent',borderDash:[5,5],tension:.3,pointRadius:2,borderWidth:1.5
+      }]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'top',labels:{usePointStyle:true,boxWidth:8,font:{size:12}}}},
+      scales:{y:{ticks:{callback:v=>'₹'+(v/100000).toFixed(1)+'L'},grid:{color:'#f1f5f9'}},x:{grid:{display:false}}}
+    }
+  });
+}
+
+function renderPipeline(){
+  const ready=document.getElementById('pipeline-ready');
+  const pending=document.getElementById('pipeline-pending');
+  const rejected=document.getElementById('pipeline-rejected');
+  const readyCands=DATA.pipeline.filter(p=>p.status==='DEPLOY_READY');
+  const blockedCands=DATA.pipeline.filter(p=>p.status!=='DEPLOY_READY');
+  const render=(arr,el)=>{
+    el.innerHTML=arr.map(p=>{
+      const cls=p.status==='DEPLOY_READY'?'ready':p.status.includes('BLOCKED')?'blocked':'wait';
+      return `<div class="pipeline-card">
+        <div><strong>${p.sym}</strong> · ${p.sector} · MomScore ${p.mom} · ${p.filters}/8 filters · Entry zone ${p.zone}</div>
+        <div><span class="pipeline-status ${cls}">${p.note}</span></div>
+      </div>`;
+    }).join('')||'<div style="padding:16px;color:var(--text3);font-size:13px">None</div>';
+  };
+  render(readyCands,ready);
+  render(blockedCands,pending);
+  rejected.innerHTML=DATA.rejected.map(r=>`<div class="pipeline-card"><div><strong>${r.sym}</strong></div><div style="color:var(--red);font-size:13px">${r.reason}</div></div>`).join('');
+}
+
+function renderTradeLog(){
+  const tbody=document.getElementById('trade-log-body');
+  tbody.innerHTML=DATA.trades.map(t=>{
+    const pnlColor=t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text2)';
+    const typeClass=t.type==='BUY'?'buy':t.type==='BOOK'?'book':'sell';
+    return `<tr>
+      <td>${t.date}</td>
+      <td><span class="feed-type ${typeClass}">${t.type}</span></td>
+      <td class="sym">${t.sym}</td>
+      <td>${t.qty}</td>
+      <td>₹${t.price.toLocaleString()}</td>
+      <td>₹${t.value.toLocaleString()}</td>
+      <td style="color:${pnlColor};font-weight:600">${t.pnl>0?'+':''}${t.pnl!==0?'₹'+t.pnl.toLocaleString():'—'}</td>
+      <td style="font-size:12px;color:var(--text2)">${t.reason}</td>
+    </tr>`;
+  }).join('');
+
+  // Stats
+  const closed=DATA.trades.filter(t=>t.type!=='BUY');
+  const wins=closed.filter(t=>t.pnl>0);
+  const losses=closed.filter(t=>t.pnl<0);
+  const totalPnl=closed.reduce((s,t)=>s+t.pnl,0);
+  document.getElementById('trade-stats').innerHTML=`
+    <div>Total closed trades: <strong>${closed.length}</strong></div>
+    <div>Winners: <strong style="color:var(--green)">${wins.length}</strong> · Losers: <strong style="color:var(--red)">${losses.length}</strong></div>
+    <div>Win rate: <strong>${closed.length?(wins.length/closed.length*100).toFixed(0):0}%</strong></div>
+    <div>Net P&L (closed): <strong style="color:${totalPnl>=0?'var(--green)':'var(--red)'}">${totalPnl>=0?'+':''}₹${totalPnl.toLocaleString()}</strong></div>
+    <div>Best trade: <strong style="color:var(--green)">AXISBANK +₹3,249 (+81%)</strong></div>
+    <div>Worst trade: <strong style="color:var(--red)">AEGISLOG -₹1,112 (-3%)</strong></div>
+    <div>Avg winner: <strong>+₹1,581</strong> · Avg loser: <strong>-₹684</strong></div>
+    <div>Profit factor: <strong>${losses.length?Math.abs(wins.reduce((s,t)=>s+t.pnl,0)/losses.reduce((s,t)=>s+t.pnl,0)).toFixed(1):'∞'}</strong></div>
+  `;
+}
+
+function renderPnlChart(){
+  const ctx=document.getElementById('pnlChart').getContext('2d');
+  const closed=DATA.trades.filter(t=>t.type!=='BUY').reverse();
+  let cumPnl=0;
+  const cumData=closed.map(t=>{cumPnl+=t.pnl;return cumPnl;});
+  new Chart(ctx,{
+    type:'line',
+    data:{labels:closed.map(t=>t.sym),datasets:[{
+      data:cumData,borderColor:'#2563eb',backgroundColor:'rgba(37,99,235,.08)',fill:true,tension:.3,pointRadius:4,borderWidth:2
+    }]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{y:{ticks:{callback:v=>'₹'+v.toLocaleString()},grid:{color:'#f1f5f9'}},x:{grid:{display:false}}}}
+  });
+}
+
+// ── TAB SWITCHING ──
+function switchTab(name){
+  document.querySelectorAll('.tab-content').forEach(el=>el.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  document.querySelector(`.tab[onclick="switchTab('${name}')"]`).classList.add('active');
+  if(name==='history'){renderPnlChart();}
+}
+
+// ── INIT ──
+renderHoldings();
+renderRiskStrip();
+renderSectors();
+renderMonthly();
+renderActivity();
+renderPerfChart();
+renderPipeline();
+renderTradeLog();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+name = "uc-portfolio"
+main = "src/index.js"
+compatibility_date = "2024-09-25"
+
+[triggers]
+crons = ["45 10 * * 1-5"]  # 10:45 UTC = 4:15 PM IST, weekdays only
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uc-portfolio-db"
+database_id = ""  # Fill after: wrangler d1 create uc-portfolio-db
