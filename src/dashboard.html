@@ -162,7 +162,7 @@ a{color:var(--blue);text-decoration:none}
 <!-- Tabs -->
 <div class="tabs">
   <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
-  <div class="tab" onclick="switchTab('pipeline')">Pipeline</div>
+  <div class="tab" onclick="switchTab('opportunities')">Opportunities</div>
   <div class="tab" onclick="switchTab('history')">History</div>
 </div>
 
@@ -306,15 +306,40 @@ a{color:var(--blue);text-decoration:none}
 </div>
 </div>
 
-<!-- Tab 2: Pipeline -->
-<div class="tab-content" id="tab-pipeline">
+<!-- Tab 2: Opportunities -->
+<div class="tab-content" id="tab-opportunities">
 <div class="container">
-  <div class="section-title">🎯 Deploy-Ready Candidates</div>
-  <div id="pipeline-ready"></div>
-  <div class="section-title">⏳ Pending Results</div>
-  <div id="pipeline-pending"></div>
-  <div class="section-title">🚫 Recently Rejected</div>
-  <div id="pipeline-rejected"></div>
+
+  <!-- Portfolio Momentum Ranking -->
+  <div class="section-title">📊 Portfolio Momentum Ranking <span class="count" id="ranking-count">11</span></div>
+  <div class="card" style="overflow-x:auto">
+    <table class="holdings-table">
+      <thead><tr><th>#</th><th>Stock</th><th>MomScore</th><th>P&L%</th><th>Stage</th><th>Signal</th></tr></thead>
+      <tbody id="ranking-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Rotation Signals -->
+  <div class="section-title">🔄 Rotation Signals</div>
+  <div class="card" id="rotation-signals">
+    <div style="padding:8px;font-size:13px;color:var(--text2)" id="rotation-container"></div>
+  </div>
+
+  <!-- Fresh Picks (auto-scanned) -->
+  <div class="section-title">🔥 Fresh Picks (auto-scanned daily) <span class="count" id="fresh-count">0</span></div>
+  <div class="card" style="overflow-x:auto">
+    <table class="holdings-table">
+      <thead><tr><th>#</th><th>Stock</th><th class="hide-mobile">Sector</th><th>MomScore</th><th class="hide-mobile">ROE</th><th class="hide-mobile">D/E</th><th>52W%</th><th>6M Ret</th><th>Filters</th></tr></thead>
+      <tbody id="fresh-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Near-Misses -->
+  <div class="section-title">🚫 Near-Misses (7/8 filters)</div>
+  <div class="card" id="near-misses">
+    <div id="nearmiss-container" style="font-size:13px"></div>
+  </div>
+
 </div>
 </div>
 
@@ -361,17 +386,17 @@ const DATA = {
   worstDay: {amount: -18200, pct: -2.5, date: 'Jul 23, 2026'},
   winRate: {wins: 8, losses: 3, avgWin: 24.3, avgLoss: -2.1},
   holdings: [
-    {sym:'CHOICEIN',sector:'Fin Svc',qty:25,entry:637,ltp:803,stage:'PARTIAL_BOOK',gtt:776,gttGap:3.4,day:0.7,isNew:false},
-    {sym:'PIDILITIND',sector:'Chemicals',qty:24,entry:1479,ltp:1619,stage:'CAP_PROTECT',gtt:1517,gttGap:6.3,day:2.9,isNew:false},
-    {sym:'WELCORP',sector:'Cap Goods',qty:47,entry:1521,ltp:1626,stage:'CAP_PROTECT',gtt:1552,gttGap:4.5,day:1.6,isNew:false},
-    {sym:'MARICO',sector:'FMCG',qty:40,entry:815,ltp:865,stage:'RISK_REDUCED',gtt:814,gttGap:5.9,day:0.8,isNew:false},
-    {sym:'AJANTPHARM',sector:'Pharma',qty:18,entry:3212,ltp:3363,stage:'CAP_PROTECT',gtt:3228,gttGap:4.0,day:-0.7,isNew:false},
-    {sym:'RRKABEL',sector:'Cap Goods',qty:15,entry:2605,ltp:2605,stage:'ENTRY_RISK',gtt:2397,gttGap:8.0,day:0,isNew:true},
-    {sym:'GABRIEL',sector:'Auto',qty:28,entry:1412,ltp:1412,stage:'ENTRY_RISK',gtt:1299,gttGap:8.0,day:0,isNew:true},
-    {sym:'NAM-INDIA',sector:'Fin Svc',qty:32,entry:1160,ltp:1151,stage:'ENTRY_RISK',gtt:1067,gttGap:7.3,day:-0.3,isNew:false},
-    {sym:'PREMIERENE',sector:'Solar',qty:35,entry:1072,ltp:1039,stage:'ENTRY_RISK',gtt:1000,gttGap:3.8,day:-0.1,isNew:false},
-    {sym:'LUPIN',sector:'Pharma',qty:14,entry:2501,ltp:2403,stage:'ENTRY_RISK',gtt:2301,gttGap:4.2,day:-0.3,isNew:false},
-    {sym:'GLENMARK',sector:'Pharma',qty:16,entry:2309,ltp:2197,stage:'ENTRY_RISK',gtt:2132,gttGap:3.0,day:0.1,isNew:false},
+    {sym:'CHOICEIN',momScore:1.82,sector:'Fin Svc',qty:25,entry:637,ltp:803,stage:'PARTIAL_BOOK',gtt:776,gttGap:3.4,day:0.7,isNew:false},
+    {sym:'PIDILITIND',momScore:1.45,sector:'Chemicals',qty:24,entry:1479,ltp:1619,stage:'CAP_PROTECT',gtt:1517,gttGap:6.3,day:2.9,isNew:false},
+    {sym:'WELCORP',momScore:1.31,sector:'Cap Goods',qty:47,entry:1521,ltp:1626,stage:'CAP_PROTECT',gtt:1552,gttGap:4.5,day:1.6,isNew:false},
+    {sym:'MARICO',momScore:0.94,sector:'FMCG',qty:40,entry:815,ltp:865,stage:'RISK_REDUCED',gtt:814,gttGap:5.9,day:0.8,isNew:false},
+    {sym:'AJANTPHARM',momScore:0.87,sector:'Pharma',qty:18,entry:3212,ltp:3363,stage:'CAP_PROTECT',gtt:3228,gttGap:4.0,day:-0.7,isNew:false},
+    {sym:'RRKABEL',momScore:2.05,sector:'Cap Goods',qty:15,entry:2605,ltp:2605,stage:'ENTRY_RISK',gtt:2397,gttGap:8.0,day:0,isNew:true},
+    {sym:'GABRIEL',momScore:1.08,sector:'Auto',qty:28,entry:1412,ltp:1412,stage:'ENTRY_RISK',gtt:1299,gttGap:8.0,day:0,isNew:true},
+    {sym:'NAM-INDIA',momScore:0.52,sector:'Fin Svc',qty:32,entry:1160,ltp:1151,stage:'ENTRY_RISK',gtt:1067,gttGap:7.3,day:-0.3,isNew:false},
+    {sym:'PREMIERENE',momScore:0.41,sector:'Solar',qty:35,entry:1072,ltp:1039,stage:'ENTRY_RISK',gtt:1000,gttGap:3.8,day:-0.1,isNew:false},
+    {sym:'LUPIN',momScore:0.38,sector:'Pharma',qty:14,entry:2501,ltp:2403,stage:'ENTRY_RISK',gtt:2301,gttGap:4.2,day:-0.3,isNew:false},
+    {sym:'GLENMARK',momScore:0.22,sector:'Pharma',qty:16,entry:2309,ltp:2197,stage:'ENTRY_RISK',gtt:2132,gttGap:3.0,day:0.1,isNew:false},
   ],
   sectors: [
     {name:'Pharma',filled:3,max:3},{name:'Cap Goods',filled:2,max:3},
@@ -394,20 +419,20 @@ const DATA = {
     {date:'Jul 28',portfolio:718435,nifty:672000},
   ],
   trades: [
-    {date:'28-Jul',type:'BUY',sym:'RRKABEL',qty:15,price:2605,value:39074,pnl:0,reason:'8/8, Q1 PAT +129%'},
-    {date:'28-Jul',type:'BUY',sym:'GABRIEL',qty:28,price:1412,value:39522,pnl:0,reason:'8/8, Auto sector open'},
+    {date:'28-Jul',type:'BUY',sym:'RRKABEL',momScore:2.05,qty:15,price:2605,value:39074,pnl:0,reason:'8/8, Q1 PAT +129%'},
+    {date:'28-Jul',type:'BUY',sym:'GABRIEL',momScore:1.08,qty:28,price:1412,value:39522,pnl:0,reason:'8/8, Auto sector open'},
     {date:'28-Jul',type:'STOP',sym:'AEGISLOG',qty:28,price:1267,value:35479,pnl:-1112,reason:'RISK_REDUCED stop, oil selloff'},
     {date:'28-Jul',type:'STOP',sym:'INOXINDIA',qty:19,price:1932,value:36711,pnl:1339,reason:'PROFIT_LOCKED graduated ✓'},
-    {date:'27-Jul',type:'BOOK',sym:'CHOICEIN',qty:10,price:802,value:8018,pnl:1648,reason:'+20% milestone catch-up'},
+    {date:'27-Jul',type:'BOOK',sym:'CHOICEIN',momScore:1.82,qty:10,price:802,value:8018,pnl:1648,reason:'+20% milestone catch-up'},
     {date:'24-Jul',type:'STOP',sym:'ACUTAAS',qty:22,price:3225,value:70950,pnl:90,reason:'Brent tightening whipsaw'},
     {date:'24-Jul',type:'STOP',sym:'CGPOWER',qty:44,price:864,value:38018,pnl:-425,reason:'Never trailed (error)'},
     {date:'23-Jul',type:'STOP',sym:'AXISBANK',qty:6,price:1208,value:7248,pnl:3249,reason:'Trailing stop — correct ✓'},
     {date:'23-Jul',type:'STOP',sym:'OFSS',qty:4,price:10663,value:42652,pnl:-516,reason:'Tight stop, CEO resigned'},
   ],
   pipeline: [
-    {sym:'HSCL',sector:'Chemicals',mom:2.23,filters:8,status:'BLOCKED_RSI',note:'RSI 70 — wait pullback',zone:'₹750-780'},
-    {sym:'DATAPATTNS',sector:'Defence',mom:2.19,filters:8,status:'BLOCKED_RESULTS',note:'Results Jul 30',zone:'~₹4,500'},
-    {sym:'RADICO',sector:'Consumer',mom:1.38,filters:8,status:'BLOCKED_RESULTS',note:'Results today',zone:'~₹4,050'},
+    {sym:'HSCL',sector:'Chemicals',mom:2.23,roe:17.8,de:0.16,filters:8,status:'BLOCKED_RSI',note:'RSI 70 — wait pullback',zone:'₹750-780'},
+    {sym:'DATAPATTNS',sector:'Defence',mom:2.19,roe:15.2,de:0.0,filters:8,status:'BLOCKED_RESULTS',note:'Results Jul 30',zone:'~₹4,500'},
+    {sym:'RADICO',sector:'Consumer',mom:1.38,roe:20.3,de:0.15,filters:8,status:'BLOCKED_RESULTS',note:'Results today',zone:'~₹4,050'},
   ],
   rejected: [
     {sym:'SCHNEIDER',reason:'Traded value ₹58 Cr < ₹75 Cr threshold'},
@@ -584,12 +609,49 @@ function renderPnlChart(){
 }
 
 // ── TAB SWITCHING ──
+function renderOpportunities(){
+  // Ranking
+  const sorted=[...DATA.holdings].sort((a,b)=>(b.momScore||0)-(a.momScore||0));
+  const bottom20=Math.ceil(sorted.length*0.2);
+  document.getElementById('ranking-body').innerHTML=sorted.map((h,i)=>{
+    const pnl=((h.ltp/h.entry-1)*100);
+    const isBottom=i>=sorted.length-bottom20;
+    const signal=h.isNew?'<span style="color:var(--blue)">🆕 New</span>':isBottom?'<span style="color:var(--red)">🔴 Bottom 20%</span>':pnl>15?'<span style="color:var(--green)">🟢 Top performer</span>':pnl>0?'<span style="color:var(--green)">🟢</span>':'<span style="color:var(--amber)">🟡</span>';
+    return `<tr style="${isBottom?'background:var(--red-bg)':''}"><td>${i+1}</td><td class="sym">${h.sym}</td><td style="font-weight:600">${(h.momScore||0).toFixed(2)}</td><td style="color:${pnl>=0?'var(--green)':'var(--red)';font-weight:600}">${pnl>=0?'+':''}${pnl.toFixed(1)}%</td><td style="font-size:11px;color:var(--text2)">${h.stage}</td><td>${signal}</td></tr>`;
+  }).join('');
+  document.getElementById('ranking-count').textContent=sorted.length;
+
+  // Rotation signals
+  const bottomStocks=sorted.slice(-bottom20);
+  const topNew=DATA.pipeline.filter(p=>p.filters>=8).sort((a,b)=>b.mom-a.mom);
+  if(bottomStocks.length>0&&topNew.length>0){
+    document.getElementById('rotation-container').innerHTML=bottomStocks.map(b=>{
+      const replacement=topNew.find(t=>t.mom>(b.momScore||0)+0.5);
+      if(!replacement)return '';
+      const gap=(replacement.mom-(b.momScore||0)).toFixed(2);
+      return `<div style="display:flex;align-items:center;gap:12px;padding:10px;border-bottom:1px solid var(--border)"><span style="color:var(--red);font-weight:600;min-width:100px">🔴 ${b.sym} (${(b.momScore||0).toFixed(2)})</span><span style="font-size:18px">→</span><span style="color:var(--green);font-weight:600;min-width:120px">🟢 ${replacement.sym} (${replacement.mom})</span><span style="background:var(--green-bg);color:var(--green);padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600">+${gap} gap ⚡ ROTATE</span></div>`;
+    }).join('')||'<div style="color:var(--text3)">No rotation signals. All holdings are performing.</div>';
+  } else {
+    document.getElementById('rotation-container').innerHTML='<div style="color:var(--text3)">Insufficient data for rotation analysis.</div>';
+  }
+
+  // Fresh picks
+  const fresh=DATA.pipeline.filter(p=>p.filters>=8);
+  document.getElementById('fresh-body').innerHTML=fresh.map((p,i)=>`<tr><td>${i+1}</td><td class="sym">${p.sym}</td><td class="hide-mobile"><span class="sector-tag">${p.sector}</span></td><td style="font-weight:600">${p.mom}</td><td class="hide-mobile">${p.roe||'-'}%</td><td class="hide-mobile">${p.de||'-'}</td><td>-</td><td>-</td><td style="color:var(--green);font-weight:600">${p.filters}/8 ✅</td></tr>`).join('')||'<tr><td colspan="9" style="color:var(--text3);text-align:center">Auto-scan runs daily at 4:15 PM. Check back tomorrow.</td></tr>';
+  document.getElementById('fresh-count').textContent=fresh.length;
+
+  // Near-misses
+  const rejected=DATA.rejected||[];
+  document.getElementById('nearmiss-container').innerHTML=rejected.map(r=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)"><strong>${r.sym}</strong> <span style="color:var(--red)">${r.reason}</span></div>`).join('')||'<div style="color:var(--text3)">No near-misses in latest scan.</div>';
+}
+
 function switchTab(name){
   document.querySelectorAll('.tab-content').forEach(el=>el.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
-  document.getElementById('tab-'+name).classList.add('active');
+  const tabEl=document.getElementById('tab-'+name);if(tabEl)tabEl.classList.add('active');
   document.querySelector(`.tab[onclick="switchTab('${name}')"]`).classList.add('active');
   if(name==='history'){renderPnlChart();}
+if(name==='opportunities'){renderOpportunities();}
 }
 
 // ── INIT ──
@@ -601,6 +663,7 @@ renderActivity();
 renderPerfChart();
 renderPipeline();
 renderTradeLog();
+renderOpportunities();
 </script>
 </body>
 </html>
