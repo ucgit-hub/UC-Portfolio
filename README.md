@@ -2,7 +2,7 @@
 
 Cloudflare Worker + D1 database powering a portfolio dashboard and analysis API for the UC_MOMENTUM trading system.
 
-## Architecture
+## Architecture 
 
 ```
 Yahoo Finance (free) → Cloudflare Worker → D1 Database
