@@ -539,25 +539,7 @@ function renderPerfChart(){
   });
 }
 
-function renderPipeline(){
-  const ready=document.getElementById('pipeline-ready');
-  const pending=document.getElementById('pipeline-pending');
-  const rejected=document.getElementById('pipeline-rejected');
-  const readyCands=DATA.pipeline.filter(p=>p.status==='DEPLOY_READY');
-  const blockedCands=DATA.pipeline.filter(p=>p.status!=='DEPLOY_READY');
-  const render=(arr,el)=>{
-    el.innerHTML=arr.map(p=>{
-      const cls=p.status==='DEPLOY_READY'?'ready':p.status.includes('BLOCKED')?'blocked':'wait';
-      return `<div class="pipeline-card">
-        <div><strong>${p.sym}</strong> · ${p.sector} · MomScore ${p.mom} · ${p.filters}/8 filters · Entry zone ${p.zone}</div>
-        <div><span class="pipeline-status ${cls}">${p.note}</span></div>
-      </div>`;
-    }).join('')||'<div style="padding:16px;color:var(--text3);font-size:13px">None</div>';
-  };
-  render(readyCands,ready);
-  render(blockedCands,pending);
-  rejected.innerHTML=DATA.rejected.map(r=>`<div class="pipeline-card"><div><strong>${r.sym}</strong></div><div style="color:var(--red);font-size:13px">${r.reason}</div></div>`).join('');
-}
+// renderPipeline removed — replaced by renderOpportunities
 
 function renderTradeLog(){
   const tbody=document.getElementById('trade-log-body');
@@ -617,7 +599,7 @@ function renderOpportunities(){
     const pnl=((h.ltp/h.entry-1)*100);
     const isBottom=i>=sorted.length-bottom20;
     const signal=h.isNew?'<span style="color:var(--blue)">🆕 New</span>':isBottom?'<span style="color:var(--red)">🔴 Bottom 20%</span>':pnl>15?'<span style="color:var(--green)">🟢 Top performer</span>':pnl>0?'<span style="color:var(--green)">🟢</span>':'<span style="color:var(--amber)">🟡</span>';
-    return `<tr style="${isBottom?'background:var(--red-bg)':''}"><td>${i+1}</td><td class="sym">${h.sym}</td><td style="font-weight:600">${(h.momScore||0).toFixed(2)}</td><td style="color:${pnl>=0?'var(--green)':'var(--red)';font-weight:600}">${pnl>=0?'+':''}${pnl.toFixed(1)}%</td><td style="font-size:11px;color:var(--text2)">${h.stage}</td><td>${signal}</td></tr>`;
+    return `<tr style="${isBottom?'background:var(--red-bg)':''}"><td>${i+1}</td><td class="sym">${h.sym}</td><td style="font-weight:600">${(h.momScore||0).toFixed(2)}</td><td style="color:${pnl>=0?'var(--green)':'var(--red)'};font-weight:600">${pnl>=0?'+':''}${pnl.toFixed(1)}%</td><td style="font-size:11px;color:var(--text2)">${h.stage}</td><td>${signal}</td></tr>`;
   }).join('');
   document.getElementById('ranking-count').textContent=sorted.length;
 
@@ -661,7 +643,6 @@ renderSectors();
 renderMonthly();
 renderActivity();
 renderPerfChart();
-renderPipeline();
 renderTradeLog();
 renderOpportunities();
 </script>
