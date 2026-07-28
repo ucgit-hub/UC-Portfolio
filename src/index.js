@@ -1,5 +1,5 @@
-// UC-Portfolio Cloudflare Worker v2.1
-// Fixes: Full Nifty 500 coverage, deterministic batching, financial sector handling, scan tracking
+// UC-Portfolio Cloudflare Worker v3.0
+// Complete: Live data, macro fetching, NAV computation, email alerts, full-universe scan
 
 import DASHBOARD_HTML from './dashboard.html';
 
@@ -7,106 +7,130 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-    if (path === '/' || path === '/dashboard') return new Response(DASHBOARD_HTML, {headers: {'Content-Type':'text/html;charset=utf-8'}});
+    const cors = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*'};
+    if (path === '/' || path === '/dashboard') return new Response(DASHBOARD_HTML, {headers:{'Content-Type':'text/html;charset=utf-8'}});
+    if (path === '/api/dashboard-data') return handleDashboardData(env);
     if (path === '/api/portfolio') return handlePortfolio(env);
-    if (path === '/api/holdings') return handleHoldings(env);
-    if (path === '/api/trades') return handleTrades(env);
-    if (path === '/api/alerts') return handleAlerts(env);
-    if (path === '/api/watchlist') return handleWatchlist(env);
-    if (path === '/api/opportunities') return handleOpportunities(env);
-    if (path === '/api/nav') return handleNav(env);
-    if (path === '/api/macro') return handleMacro(env);
-    if (path === '/api/scan' && request.method === 'POST') return handleScan(request, env);
-    if (path === '/api/refresh') return handleRefresh(env);
+    if (path === '/api/holdings') return json((await env.DB.prepare('SELECT * FROM holdings ORDER BY momentum_score DESC').all()).results);
+    if (path === '/api/trades') return json((await env.DB.prepare('SELECT * FROM trades ORDER BY id DESC LIMIT 100').all()).results);
+    if (path === '/api/alerts') return json((await env.DB.prepare('SELECT * FROM alerts WHERE resolved=0 ORDER BY severity DESC').all()).results);
+    if (path === '/api/opportunities') return json((await env.DB.prepare('SELECT * FROM opportunities ORDER BY momentum_score DESC LIMIT 30').all()).results);
+    if (path === '/api/nav') return json((await env.DB.prepare('SELECT * FROM daily_nav ORDER BY date ASC').all()).results);
+    if (path === '/api/macro') return json(await env.DB.prepare('SELECT * FROM macro_state WHERE id=1').first());
     if (path === '/api/ranking') return handleRanking(env);
     if (path === '/api/scan-status') return handleScanStatus(env);
+    if (path === '/api/scan' && request.method === 'POST') return handleScan(request, env);
+    if (path === '/api/refresh') return handleRefresh(env);
     return new Response('Not found', {status:404});
   },
   async scheduled(event, env) { await dailyCron(env); }
 };
 
-// ── API HANDLERS ──
-async function handlePortfolio(env) {
-  const [holdings, nav, macro, alerts, config] = await Promise.all([
-    env.DB.prepare('SELECT * FROM holdings ORDER BY momentum_score DESC').all(),
-    env.DB.prepare('SELECT * FROM daily_nav ORDER BY date DESC LIMIT 1').first(),
+async function handleDashboardData(env) {
+  const [holdingsR, navR, macroR, alertsR, configR, tradesR, oppsR, nearMissR] = await Promise.all([
+    env.DB.prepare('SELECT h.*, i.ltp as live_ltp FROM holdings h LEFT JOIN indicators i ON h.symbol=i.symbol ORDER BY h.momentum_score DESC').all(),
+    env.DB.prepare('SELECT * FROM daily_nav ORDER BY date DESC LIMIT 30').all(),
     env.DB.prepare('SELECT * FROM macro_state WHERE id=1').first(),
-    env.DB.prepare('SELECT * FROM alerts WHERE resolved=0 ORDER BY severity DESC').all(),
-    env.DB.prepare('SELECT * FROM config').all()
+    env.DB.prepare('SELECT * FROM alerts WHERE resolved=0 ORDER BY CASE severity WHEN "CRITICAL" THEN 1 WHEN "WARNING" THEN 2 ELSE 3 END, created_at DESC').all(),
+    env.DB.prepare('SELECT * FROM config').all(),
+    env.DB.prepare('SELECT * FROM trades ORDER BY id DESC LIMIT 100').all(),
+    env.DB.prepare('SELECT * FROM opportunities WHERE verdict="BUY_CANDIDATE" AND is_holding=0 AND scan_date>=date("now","-7 days") ORDER BY momentum_score DESC LIMIT 15').all(),
+    env.DB.prepare('SELECT * FROM opportunities WHERE filters_passed=7 AND scan_date>=date("now","-7 days") ORDER BY momentum_score DESC LIMIT 10').all()
   ]);
-  return json({holdings:holdings.results, nav, macro, alerts:alerts.results, config:Object.fromEntries(config.results.map(c=>[c.key,c.value]))});
-}
-async function handleHoldings(env) { return json((await env.DB.prepare('SELECT * FROM holdings ORDER BY momentum_score DESC').all()).results); }
-async function handleTrades(env) { return json((await env.DB.prepare('SELECT * FROM trades ORDER BY id DESC LIMIT 50').all()).results); }
-async function handleAlerts(env) { return json((await env.DB.prepare('SELECT * FROM alerts WHERE resolved=0 ORDER BY severity DESC').all()).results); }
-async function handleWatchlist(env) { return json((await env.DB.prepare('SELECT * FROM watchlist ORDER BY momentum_score DESC').all()).results); }
-async function handleOpportunities(env) { return json((await env.DB.prepare('SELECT * FROM opportunities ORDER BY momentum_score DESC LIMIT 30').all()).results); }
-async function handleNav(env) { return json((await env.DB.prepare('SELECT * FROM daily_nav ORDER BY date ASC').all()).results); }
-async function handleMacro(env) { return json(await env.DB.prepare('SELECT * FROM macro_state WHERE id=1').first()); }
-
-async function handleScanStatus(env) {
-  const cursor = await env.DB.prepare("SELECT value FROM config WHERE key='scan_cursor'").first();
-  const lastRun = await env.DB.prepare("SELECT value FROM config WHERE key='last_scan_date'").first();
-  const total = await env.DB.prepare('SELECT COUNT(*) as c FROM opportunities WHERE scan_date >= date("now","-6 days")').first();
-  const candidates = await env.DB.prepare('SELECT COUNT(*) as c FROM opportunities WHERE verdict="BUY_CANDIDATE" AND scan_date >= date("now","-6 days")').first();
+  const config = Object.fromEntries(configR.results.map(c=>[c.key,c.value]));
+  const baseline = parseFloat(config.baseline || '650393');
+  const holdings = holdingsR.results;
+  const trades = tradesR.results;
+  const navHistory = navR.results.reverse();
+  const latestNav = navHistory.length > 0 ? navHistory[navHistory.length - 1] : null;
+  const cashKite = parseFloat(config.cash_kite || '0');
+  const cashBank = parseFloat(config.cash_bank || '0');
+  const lbQty = parseInt(config.liquidbees_qty || '0');
+  const lbNav = parseFloat(config.liquidbees_nav || '1000');
+  const lbValue = lbQty * lbNav;
+  let equityValue = 0;
+  holdings.forEach(h => { equityValue += h.quantity * (h.live_ltp || h.entry_price); });
+  const netWorth = equityValue + lbValue + cashKite + cashBank;
+  const returnPct = round((netWorth / baseline - 1) * 100);
+  const absGain = round(netWorth - baseline);
+  const n50base = parseFloat(config.nifty50_baseline || '1');
+  const n500base = parseFloat(config.nifty500_baseline || '1');
+  const n50now = macroR?.nifty_close || n50base;
+  const n50return = round((n50now / n50base - 1) * 100);
+  const n500return = round(((macroR?.nifty500_close || n500base) / n500base - 1) * 100);
+  const alphaN50 = round(returnPct - n50return);
+  const alphaN500 = round(returnPct - n500return);
+  const closedTrades = trades.filter(t => t.trade_type !== 'BUY');
+  const winners = closedTrades.filter(t => t.pnl > 0);
+  const losers = closedTrades.filter(t => t.pnl < 0);
+  const winRateAll = closedTrades.length > 0 ? round(winners.length / closedTrades.length * 100, 0) : 0;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const monthTrades = closedTrades.filter(t => t.trade_date && t.trade_date.startsWith(thisMonth.replace('-', '-')));
+  const monthWins = monthTrades.filter(t => t.pnl > 0);
+  const winRateMonth = monthTrades.length > 0 ? round(monthWins.length / monthTrades.length * 100, 0) : null;
+  let bestDay = {amount: 0, pct: 0, date: '-'};
+  let worstDay = {amount: 0, pct: 0, date: '-'};
+  for (let i = 1; i < navHistory.length; i++) {
+    if (!navHistory[i].net_worth || !navHistory[i-1].net_worth) continue;
+    const change = navHistory[i].net_worth - navHistory[i-1].net_worth;
+    const changePct = (change / navHistory[i-1].net_worth) * 100;
+    if (change > bestDay.amount) bestDay = {amount: round(change,0), pct: round(changePct), date: navHistory[i].date};
+    if (change < worstDay.amount) worstDay = {amount: round(change,0), pct: round(changePct), date: navHistory[i].date};
+  }
+  const bestTrade = closedTrades.reduce((best, t) => t.pnl > (best?.pnl||0) ? t : best, null);
+  const worstTrade = closedTrades.reduce((worst, t) => t.pnl < (worst?.pnl||0) ? t : worst, null);
+  const avgWinner = winners.length > 0 ? round(winners.reduce((s,t)=>s+t.pnl,0)/winners.length, 0) : 0;
+  const avgLoser = losers.length > 0 ? round(losers.reduce((s,t)=>s+t.pnl,0)/losers.length, 0) : 0;
+  const profitFactor = losers.length > 0 ? round(Math.abs(winners.reduce((s,t)=>s+t.pnl,0) / losers.reduce((s,t)=>s+t.pnl,0))) : null;
+  const sectorCounts = {};
+  holdings.forEach(h => { sectorCounts[h.sector] = (sectorCounts[h.sector]||0) + 1; });
+  const bottom = holdings.filter(h => h.is_bottom_20);
+  const topOpp = oppsR.results.slice(0, 5);
+  const rotations = bottom.map(b => {
+    const r = topOpp.find(t => t.momentum_score > (b.momentum_score||0) + 0.5);
+    return r ? {exit:b.symbol, exitScore:b.momentum_score, enter:r.symbol, enterScore:r.momentum_score, gap:round(r.momentum_score-(b.momentum_score||0))} : null;
+  }).filter(Boolean);
   return json({
-    currentBatch: cursor?.value || '0', totalBatches: 5,
-    lastScanDate: lastRun?.value || 'never',
-    stocksScannedThisWeek: total?.c || 0, universeSize: 504,
-    candidatesFound: candidates?.c || 0,
-    coveragePct: Math.round(((total?.c || 0) / 504) * 100)
+    macro: {regime: macroR?.regime || config.regime || 'NORMAL',brent: macroR?.brent_price,vix: macroR?.vix,nifty: macroR?.nifty_close,freeze: macroR?.freeze_active === 1,gate: {brent: macroR?.gate_brent===1, vix: macroR?.gate_vix===1, nifty: macroR?.gate_nifty===1},updatedAt: macroR?.updated_at},
+    netWorth: round(netWorth,0),baseline,returnPct,absGain: round(absGain,0),alphaN50, alphaN500, n50return, n500return,
+    bestDay, worstDay,
+    winRate: {all: winRateAll, month: winRateMonth, wins: winners.length, losses: losers.length, monthTotal: monthTrades.length, monthWins: monthWins.length},
+    deployed: {pct: round(equityValue/netWorth*100,0), count: holdings.length, equity: round(equityValue,0), cash: round(lbValue+cashKite,0)},
+    holdings: holdings.map(h => {const ltp = h.live_ltp || h.entry_price;const pnl = (ltp/h.entry_price-1)*100;const val = h.quantity * ltp;const gttGap = h.gtt_trigger ? (ltp/h.gtt_trigger-1)*100 : 0;return {...h, ltp: round(ltp), pnl_pct: round(pnl), value: round(val,0), gtt_gap_pct: round(gttGap)};}),
+    sectors: sectorCounts,alerts: alertsR.results,trades,
+    tradeStats: {total: closedTrades.length, wins: winners.length, losses: losers.length,winRate: winRateAll, netPnl: round(closedTrades.reduce((s,t)=>s+t.pnl,0),0),bestTrade: bestTrade ? {sym:bestTrade.symbol, pnl:bestTrade.pnl, pct:bestTrade.pnl_pct} : null,worstTrade: worstTrade ? {sym:worstTrade.symbol, pnl:worstTrade.pnl, pct:worstTrade.pnl_pct} : null,avgWinner, avgLoser, profitFactor},
+    navHistory: navHistory.map(n => ({date:n.date, nw:n.net_worth, n50:n.nifty50_close, n500:n.nifty500_close})),
+    monthlyReturns: computeMonthlyReturns(navHistory),freshPicks: oppsR.results,nearMisses: nearMissR.results,rotations,scanCoverage: null
   });
 }
 
+function computeMonthlyReturns(navHistory) {
+  if (navHistory.length < 2) return [];
+  const months = {};
+  navHistory.forEach(n => {if (!n.net_worth || !n.date) return;const m = n.date.slice(0, 7);if (!months[m]) months[m] = {first: n.net_worth, last: n.net_worth};months[m].last = n.net_worth;});
+  return Object.entries(months).map(([m, v]) => ({month: m,pct: round((v.last / v.first - 1) * 100)}));
+}
+
+async function handlePortfolio(env) { return handleDashboardData(env); }
 async function handleRanking(env) {
-  const holdings = (await env.DB.prepare('SELECT symbol, sector, momentum_score, momentum_rank, is_bottom_20, entry_price, gtt_stage FROM holdings ORDER BY momentum_score DESC').all()).results;
-  const topNew = (await env.DB.prepare('SELECT symbol, sector, momentum_score, filters_passed, verdict FROM opportunities WHERE verdict="BUY_CANDIDATE" AND is_holding=0 AND sector_slot_available=1 AND scan_date >= date("now","-6 days") ORDER BY momentum_score DESC LIMIT 10').all()).results;
-  const bottom = holdings.filter(h => h.is_bottom_20);
-  const rotations = bottom.map(b => {
-    const r = topNew.find(t => t.momentum_score > (b.momentum_score||0) + 0.5);
-    return r ? {exit:b.symbol, exitScore:b.momentum_score, enter:r.symbol, enterScore:r.momentum_score, gap:round(r.momentum_score-(b.momentum_score||0))} : null;
-  }).filter(Boolean);
-  return json({holdings, topNew, rotations});
+  const holdings = (await env.DB.prepare('SELECT symbol,sector,momentum_score,momentum_rank,is_bottom_20,entry_price,gtt_stage FROM holdings ORDER BY momentum_score DESC').all()).results;
+  const topNew = (await env.DB.prepare('SELECT symbol,sector,momentum_score,filters_passed,verdict FROM opportunities WHERE verdict="BUY_CANDIDATE" AND is_holding=0 AND sector_slot_available=1 AND scan_date>=date("now","-6 days") ORDER BY momentum_score DESC LIMIT 10').all()).results;
+  return json({holdings, topNew});
 }
-
-async function handleScan(request, env) {
-  const body = await request.json();
-  const {symbol, roe, de, mcap, regime='NORMAL', nifty500=true, nifty100=false} = body;
-  const candles = await fetchYahooCandles(symbol + '.NS', 365);
-  if (!candles || candles.length < 100) return json({error:'Insufficient data', symbol});
-  return json(computeIndicators(candles, symbol, roe, de, mcap, regime, nifty500, nifty100));
+async function handleScanStatus(env) {
+  const cursor = await env.DB.prepare("SELECT value FROM config WHERE key='scan_cursor'").first();
+  const lastRun = await env.DB.prepare("SELECT value FROM config WHERE key='last_scan_date'").first();
+  const total = await env.DB.prepare('SELECT COUNT(*) as c FROM opportunities WHERE scan_date>=date("now","-6 days")').first();
+  const candidates = await env.DB.prepare('SELECT COUNT(*) as c FROM opportunities WHERE verdict="BUY_CANDIDATE" AND scan_date>=date("now","-6 days")').first();
+  return json({currentBatch:cursor?.value||'0', totalBatches:5, lastScanDate:lastRun?.value||'never', stocksScanned:total?.c||0, universeSize:504, candidatesFound:candidates?.c||0, coveragePct:Math.round(((total?.c||0)/504)*100)});
 }
-
+async function handleScan(request, env) {const body = await request.json();const {symbol, roe, de, mcap, regime='NORMAL', nifty500=true, nifty100=false} = body;const candles = await fetchYahooCandles(symbol + '.NS', 365);if (!candles || candles.length < 100) return json({error:'Insufficient data', symbol});return json(computeIndicators(candles, symbol, roe, de, mcap, regime, nifty500, nifty100));}
 async function handleRefresh(env) { return json(await dailyCron(env)); }
 
-// ── YAHOO FINANCE ──
-async function fetchYahooCandles(sym, days) {
-  const now = Math.floor(Date.now()/1000), from = now - days*86400;
-  try {
-    const r = await fetch(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?period1=${from}&period2=${now}&interval=1d`, {headers:{'User-Agent':'Mozilla/5.0'}});
-    const d = await r.json(), res = d?.chart?.result?.[0];
-    if (!res) return null;
-    const ts=res.timestamp, q=res.indicators.quote[0];
-    return ts.map((t,i)=>({date:new Date(t*1000).toISOString().split('T')[0],open:q.open[i],high:q.high[i],low:q.low[i],close:q.close[i],volume:q.volume[i]})).filter(c=>c.close!=null);
-  } catch(e) { return null; }
-}
+async function fetchYahooCandles(sym, days) {const now = Math.floor(Date.now()/1000), from = now - days*86400;try {const r = await fetch(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?period1=${from}&period2=${now}&interval=1d`, {headers:{'User-Agent':'Mozilla/5.0'}});const d = await r.json(), res = d?.chart?.result?.[0];if (!res) return null;const ts=res.timestamp, q=res.indicators.quote[0];return ts.map((t,i)=>({date:new Date(t*1000).toISOString().split('T')[0],open:q.open[i],high:q.high[i],low:q.low[i],close:q.close[i],volume:q.volume[i]})).filter(c=>c.close!=null);} catch(e) { return null; }}
+async function fetchYahooFundamentals(sym) {try {const r = await fetch(`https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=financialData,defaultKeyStatistics,summaryDetail`, {headers:{'User-Agent':'Mozilla/5.0'}});const d = await r.json(), res = d?.quoteSummary?.result?.[0];if (!res) return null;const fd = res.financialData || {}, sd = res.summaryDetail || {};return {roe:round((fd.returnOnEquity?.raw||0)*100), de:round(fd.debtToEquity?.raw?fd.debtToEquity.raw/100:0,3), mcap:round((sd.marketCap?.raw||0)/1e7,0), currentPrice:fd.currentPrice?.raw||0};} catch(e) { return null; }}
+async function fetchYahooQuote(sym) {try {const candles = await fetchYahooCandles(sym, 5);if (!candles || candles.length === 0) return null;return candles[candles.length - 1].close;} catch(e) { return null; }}
 
-async function fetchYahooFundamentals(sym) {
-  try {
-    const r = await fetch(`https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=financialData,defaultKeyStatistics,summaryDetail`, {headers:{'User-Agent':'Mozilla/5.0'}});
-    const d = await r.json(), res = d?.quoteSummary?.result?.[0];
-    if (!res) return null;
-    const fd = res.financialData || {}, sd = res.summaryDetail || {};
-    return {
-      roe: round((fd.returnOnEquity?.raw || 0) * 100),
-      de: round(fd.debtToEquity?.raw ? fd.debtToEquity.raw / 100 : 0, 3),
-      mcap: round((sd.marketCap?.raw || 0) / 1e7, 0),
-      currentPrice: fd.currentPrice?.raw || 0
-    };
-  } catch(e) { return null; }
-}
-
-// ── INDICATOR ENGINE ──
 function computeIndicators(candles, symbol, roe, de, mcap, regime, nifty500, nifty100) {
   const n=candles.length, closes=candles.map(c=>c.close), highs=candles.map(c=>c.high), lows=candles.map(c=>c.low), volumes=candles.map(c=>c.volume), current=closes[n-1];
   const dma200=n>=200?mean(closes.slice(-200)):null, above200=dma200?current>dma200:null;
@@ -118,128 +142,51 @@ function computeIndicators(candles, symbol, roe, de, mcap, regime, nifty500, nif
   let vol1y=null; const vl=Math.min(252,n-1);
   if(vl>=20){const lr=[];for(let i=n-vl;i<n;i++)lr.push(Math.log(closes[i]/closes[i-1]));vol1y=std(lr)*Math.sqrt(252)*100;}
   const momScore=ret6m&&vol1y>0?(ret6m/100)/(vol1y/100):null;
-  let rsi=null;
-  if(n>=15){const d=[];for(let i=n-14;i<n;i++)d.push(closes[i]-closes[i-1]);const g=d.filter(x=>x>0),l=d.filter(x=>x<0).map(x=>-x);const ag=g.length?mean(g):0,al=l.length?mean(l):0;rsi=al===0?100:100-100/(1+ag/al);}
-  let atr=null;
-  if(n>=15){const t=[];for(let i=n-14;i<n;i++)t.push(Math.max(highs[i]-lows[i],Math.abs(highs[i]-closes[i-1]),Math.abs(lows[i]-closes[i-1])));atr=mean(t);}
-  let tradedValCr=null;
-  if(n>=20){const tv=[];for(let i=n-20;i<n;i++)tv.push(closes[i]*volumes[i]);tradedValCr=mean(tv)/1e7;}
+  let rsi=null;if(n>=15){const d=[];for(let i=n-14;i<n;i++)d.push(closes[i]-closes[i-1]);const g=d.filter(x=>x>0),l=d.filter(x=>x<0).map(x=>-x);const ag=g.length?mean(g):0,al=l.length?mean(l):0;rsi=al===0?100:100-100/(1+ag/al);}
+  let atr=null;if(n>=15){const t=[];for(let i=n-14;i<n;i++)t.push(Math.max(highs[i]-lows[i],Math.abs(highs[i]-closes[i-1]),Math.abs(lows[i]-closes[i-1])));atr=mean(t);}
+  let tradedValCr=null;if(n>=20){const tv=[];for(let i=n-20;i<n;i++)tv.push(closes[i]*volumes[i]);tradedValCr=mean(tv)/1e7;}
   const volThreshold=nifty100?50:75, volPass=tradedValCr!==null&&tradedValCr>=volThreshold;
   const filters={'Mcap 5K-200K':mcap>=5000&&mcap<=200000,'ROE >15%':roe>15,'D/E <1':de<1,'Above 200 DMA':above200===true,'52W High band':within52w,'Positive 6M Return':ret6m!==null&&ret6m>0,'Traded Value':volPass,'Nifty 500':nifty500===true};
-  const passed=Object.values(filters).filter(Boolean).length;
-  const failed=Object.entries(filters).filter(([,v])=>!v).map(([k])=>k);
+  const passed=Object.values(filters).filter(Boolean).length;const failed=Object.entries(filters).filter(([,v])=>!v).map(([k])=>k);
   return {symbol,ltp:round(current),dma_200:round(dma200),dma_20:round(dma20),high_52w:round(high52w),low_52w:round(low52w),dist_52w_pct:round(dist52w),return_6m_pct:round(ret6m),vol_1y_pct:round(vol1y),momentum_score:round(momScore,4),rsi_14:round(rsi),atr_14:round(atr),atr_pct:round(atr?atr/current*100:null),traded_val_cr:round(tradedValCr),above_200_dma:above200,filters_passed:passed,failed_filters:failed,verdict:passed===8?'BUY_CANDIDATE':'REJECT',roe,de,mcap,candles:n};
 }
-
-// ══════════════════════════════════════════════
-// DAILY CRON — DETERMINISTIC FULL-UNIVERSE SCAN
-// ══════════════════════════════════════════════
-//
-// Nifty 500 split into 5 batches of ~101 (ordered by symbol)
-// Batch 0 = Mon, 1 = Tue, ... 4 = Fri (cursor cycles 0-4)
-// Full universe covered every 5 trading days — deterministic, not random
-//
-// Budget: ~11 holdings + ~100 batch symbols × (1 fund call + ~10% candle call)
-//       = ~11 + 100 + 10 candle calls ≈ 121 fetches, ~25 sec — fits Worker limits
-//
 
 const FINANCIAL_SECTORS = ['Financial Services'];
 
 async function dailyCron(env) {
   const log = {started: new Date().toISOString(), parts: {}};
-
-  // PART A: Rank holdings
-  const holdings = (await env.DB.prepare('SELECT * FROM holdings').all()).results;
-  const holdingSymbols = new Set(holdings.map(h => h.symbol));
-  const holdingScores = [];
-
-  for (const h of holdings) {
-    const sym = h.symbol + (h.exchange === 'BSE' ? '.BO' : '.NS');
-    const candles = await fetchYahooCandles(sym, 365);
-    if (!candles || candles.length < 30) { holdingScores.push({symbol:h.symbol,score:0}); continue; }
-    const n=candles.length, closes=candles.map(c=>c.close);
-    const ret6m=n>126?(closes[n-1]/closes[n-127]-1)*100:0;
-    const vl=Math.min(252,n-1); let vol1y=30;
-    if(vl>=20){const lr=[];for(let i=n-vl;i<n;i++)lr.push(Math.log(closes[i]/closes[i-1]));vol1y=std(lr)*Math.sqrt(252)*100;}
-    holdingScores.push({symbol:h.symbol, score:round(vol1y>0?(ret6m/100)/(vol1y/100):0,4)});
-    const dma200=n>=200?mean(closes.slice(-200)):null, dma20=n>=20?mean(closes.slice(-20)):null;
-    const high52w=Math.max(...candles.slice(-252).map(c=>c.high));
-    await env.DB.prepare('INSERT OR REPLACE INTO indicators (symbol,ltp,dma_200,dma_20,high_52w,above_200_dma,above_20_dma,updated_at) VALUES(?,?,?,?,?,?,?,datetime("now"))').bind(h.symbol,closes[n-1],dma200,dma20,high52w,dma200?closes[n-1]>dma200?1:0:null,dma20?closes[n-1]>dma20?1:0:null).run();
-  }
-
-  holdingScores.sort((a,b) => b.score - a.score);
-  const bottom20pct = Math.ceil(holdingScores.length * 0.2);
-  for (let i = 0; i < holdingScores.length; i++) {
-    await env.DB.prepare('UPDATE holdings SET momentum_score=?, momentum_rank=?, is_bottom_20=? WHERE symbol=?')
-      .bind(holdingScores[i].score, i+1, i >= holdingScores.length - bottom20pct ? 1 : 0, holdingScores[i].symbol).run();
-  }
-  log.parts.holdingsRanked = holdingScores.length;
-
-  // PART B: Deterministic batch scan
-  const cursorRow = await env.DB.prepare("SELECT value FROM config WHERE key='scan_cursor'").first();
-  const cursor = cursorRow ? parseInt(cursorRow.value) : 0;
-  const batchSize = 101;
-  const batchSymbols = (await env.DB.prepare(
-    'SELECT symbol, industry FROM nifty500 WHERE series="EQ" ORDER BY symbol LIMIT ? OFFSET ?'
-  ).bind(batchSize, cursor * batchSize).all()).results;
-
-  let scanned=0, fundPass=0, fullPass=0;
-
-  for (const s of batchSymbols) {
-    scanned++;
-    const isFinancial = FINANCIAL_SECTORS.includes(s.industry);
-    const fund = await fetchYahooFundamentals(s.symbol + '.NS');
-    if (!fund) continue;
-    if (fund.mcap < 5000 || fund.mcap > 200000) continue;
-    if (fund.roe <= 15) continue;
-    if (!isFinancial && fund.de >= 1) continue;
-    fundPass++;
-
-    const candles = await fetchYahooCandles(s.symbol + '.NS', 365);
-    if (!candles || candles.length < 100) continue;
-    const result = computeIndicators(candles, s.symbol, fund.roe, fund.de, fund.mcap, 'NORMAL', true, false);
-
-    // Financial sector: override D/E filter
-    let adjPassed = result.filters_passed, adjFailed = [...result.failed_filters], adjVerdict = result.verdict;
-    if (isFinancial && adjFailed.includes('D/E <1')) {
-      adjFailed = adjFailed.filter(f => f !== 'D/E <1');
-      adjPassed++;
-      adjVerdict = adjPassed === 8 ? 'BUY_CANDIDATE' : 'REJECT';
-    }
-    if (adjPassed >= 7) fullPass++;
-
-    const isHolding = holdingSymbols.has(s.symbol) ? 1 : 0;
-    const sectorCount = holdings.filter(h => h.sector === s.industry).length;
-    const worstH = holdingScores.length > 0 ? holdingScores[holdingScores.length-1] : null;
-    const replaces = worstH && result.momentum_score > (worstH.score||0) + 0.5 ? worstH.symbol : null;
-
-    await env.DB.prepare(
-      'INSERT OR REPLACE INTO opportunities (symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,vol_1y_pct,momentum_score,rsi_14,traded_val_cr,filters_passed,failed_filters,verdict,is_holding,sector_slot_available,rotation_replaces,scan_date,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,date("now"),datetime("now"))'
-    ).bind(s.symbol,s.industry,fund.roe,fund.de,fund.mcap,result.ltp,result.dma_200,result.dist_52w_pct,result.return_6m_pct,result.vol_1y_pct,result.momentum_score,result.rsi_14,result.traded_val_cr,adjPassed,JSON.stringify(adjFailed),adjVerdict,isHolding,sectorCount<3?1:0,replaces).run();
-  }
-
-  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('scan_cursor',?)").bind(String((cursor+1)%5)).run();
-  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('last_scan_date',?)").bind(new Date().toISOString()).run();
-  await env.DB.prepare('DELETE FROM opportunities WHERE scan_date < date("now","-7 days")').run();
-  log.parts.batch = {cursor, scanned, fundPass, fullPass};
-
-  // PART C: Rotation alerts
-  const bottomH = holdingScores.filter((_,i) => i >= holdingScores.length - bottom20pct);
-  const topOpp = (await env.DB.prepare('SELECT symbol,momentum_score,sector FROM opportunities WHERE verdict="BUY_CANDIDATE" AND is_holding=0 AND sector_slot_available=1 AND scan_date>=date("now","-6 days") ORDER BY momentum_score DESC LIMIT 5').all()).results;
-  for (const b of bottomH) {
-    const r = topOpp.find(t => t.momentum_score > (b.score||0) + 0.5);
-    if (r) {
-      const exists = await env.DB.prepare('SELECT id FROM alerts WHERE symbol=? AND alert_type="ROTATION" AND resolved=0').bind(b.symbol).first();
-      if (!exists) await env.DB.prepare('INSERT INTO alerts (created_at,alert_type,symbol,severity,message) VALUES(datetime("now"),"ROTATION",?,"WARNING",?)').bind(b.symbol, `Rotate ${b.symbol} (${b.score}) → ${r.symbol} (${r.momentum_score}). Gap: +${round(r.momentum_score-(b.score||0))}`).run();
-    }
-  }
-
-  log.parts.rotationSignals = topOpp.length;
-  log.finished = new Date().toISOString();
-  return log;
+  const [nifty50, nifty500, vixVal, brentVal] = await Promise.all([fetchYahooQuote('^NSEI'),fetchYahooQuote('^CRSLDX'),fetchYahooQuote('^INDIAVIX'),fetchYahooQuote('BZ=F')]);
+  const freezeActive = brentVal && brentVal > 90 ? 1 : 0;const gateBrent = brentVal && brentVal < 90 ? 1 : 0;const gateVix = vixVal && vixVal < 17 ? 1 : 0;const gateNifty = nifty50 && nifty50 > 24300 ? 1 : 0;
+  let regime = 'NORMAL';if (vixVal && vixVal > 25) regime = 'CRISIS';else if (vixVal && vixVal < 15 && nifty50) regime = 'BULL';else if (vixVal && vixVal > 18) regime = 'CHOPPY';
+  await env.DB.prepare('INSERT OR REPLACE INTO macro_state (id,brent_price,vix,nifty_close,regime,freeze_active,gate_brent,gate_vix,gate_nifty,updated_at) VALUES(1,?,?,?,?,?,?,?,?,datetime("now"))').bind(brentVal,vixVal,nifty50,regime,freezeActive,gateBrent,gateVix,gateNifty).run();
+  if (nifty500) await env.DB.prepare('UPDATE macro_state SET nifty500_close=? WHERE id=1').bind(nifty500).run();
+  log.parts.macro = {nifty50, nifty500, vix: vixVal, brent: brentVal, regime};
+  const holdings = (await env.DB.prepare('SELECT * FROM holdings').all()).results;const holdingSymbols = new Set(holdings.map(h => h.symbol));const holdingScores = [];
+  for (const h of holdings) {const sym = h.symbol + (h.exchange === 'BSE' ? '.BO' : '.NS');const candles = await fetchYahooCandles(sym, 365);if (!candles || candles.length < 30) { holdingScores.push({symbol:h.symbol,score:0,ltp:0}); continue; }const n=candles.length, closes=candles.map(c=>c.close), current=closes[n-1];const ret6m=n>126?(current/closes[n-127]-1)*100:0;const vl=Math.min(252,n-1); let vol1y=30;if(vl>=20){const lr=[];for(let i=n-vl;i<n;i++)lr.push(Math.log(closes[i]/closes[i-1]));vol1y=std(lr)*Math.sqrt(252)*100;}holdingScores.push({symbol:h.symbol, score:round(vol1y>0?(ret6m/100)/(vol1y/100):0,4), ltp:current});const dma200=n>=200?mean(closes.slice(-200)):null, dma20=n>=20?mean(closes.slice(-20)):null;const high52w=Math.max(...candles.slice(-Math.min(252,n)).map(c=>c.high));const rsi14 = computeRSI(closes);await env.DB.prepare('INSERT OR REPLACE INTO indicators (symbol,ltp,dma_200,dma_20,high_52w,above_200_dma,above_20_dma,rsi_14,updated_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))').bind(h.symbol,current,dma200,dma20,high52w,dma200?current>dma200?1:0:null,dma20?current>dma20?1:0:null,rsi14).run();}
+  holdingScores.sort((a,b) => b.score - a.score);const bottom20pct = Math.ceil(holdingScores.length * 0.2);for (let i = 0; i < holdingScores.length; i++) {await env.DB.prepare('UPDATE holdings SET momentum_score=?, momentum_rank=?, is_bottom_20=? WHERE symbol=?').bind(holdingScores[i].score, i+1, i>=holdingScores.length-bottom20pct?1:0, holdingScores[i].symbol).run();}log.parts.holdingsRanked = holdingScores.length;
+  const config = Object.fromEntries((await env.DB.prepare('SELECT * FROM config').all()).results.map(c=>[c.key,c.value]));const cashKite = parseFloat(config.cash_kite || '0');const cashBank = parseFloat(config.cash_bank || '0');const lbQty = parseInt(config.liquidbees_qty || '0');const lbNav = parseFloat(config.liquidbees_nav || '1000');let equityValue = 0;holdingScores.forEach(h => { equityValue += (holdings.find(x=>x.symbol===h.symbol)?.quantity||0) * h.ltp; });const netWorth = equityValue + (lbQty * lbNav) + cashKite + cashBank;const today = new Date().toISOString().split('T')[0];
+  const prevNav = await env.DB.prepare('SELECT net_worth FROM daily_nav WHERE date < ? ORDER BY date DESC LIMIT 1').bind(today).first();const dayChange = prevNav?.net_worth ? netWorth - prevNav.net_worth : 0;const dayChangePct = prevNav?.net_worth ? (dayChange / prevNav.net_worth) * 100 : 0;const baseline = parseFloat(config.baseline || '650393');const portfolioReturnPct = (netWorth / baseline - 1) * 100;
+  await env.DB.prepare('INSERT OR REPLACE INTO daily_nav (date,equity_value,liquidbees_value,cash_kite,cash_bank,net_worth,nifty_close,portfolio_return_pct,positions_count,cash_ratio_pct,nifty50_close,nifty500_close,vix_close,brent_close,day_change_pct,day_change_abs) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(today, round(equityValue,0), round(lbQty*lbNav,0), cashKite, cashBank, round(netWorth,0),nifty50, round(portfolioReturnPct), holdings.length, round((lbQty*lbNav+cashKite)/netWorth*100),nifty50, nifty500, vixVal, brentVal, round(dayChangePct), round(dayChange,0)).run();log.parts.nav = {netWorth: round(netWorth,0), dayChange: round(dayChange,0), returnPct: round(portfolioReturnPct)};
+  const cursorRow = await env.DB.prepare("SELECT value FROM config WHERE key='scan_cursor'").first();const cursor = cursorRow ? parseInt(cursorRow.value) : 0;const batchSize = 101;const batchSymbols = (await env.DB.prepare('SELECT symbol,industry FROM nifty500 WHERE series="EQ" ORDER BY symbol LIMIT ? OFFSET ?').bind(batchSize, cursor*batchSize).all()).results;let scanned=0, fundPass=0, fullPass=0;
+  for (const s of batchSymbols) {scanned++;const isFinancial = FINANCIAL_SECTORS.includes(s.industry);const fund = await fetchYahooFundamentals(s.symbol + '.NS');if (!fund) continue;if (fund.mcap < 5000 || fund.mcap > 200000 || fund.roe <= 15) continue;if (!isFinancial && fund.de >= 1) continue;fundPass++;const candles = await fetchYahooCandles(s.symbol + '.NS', 365);if (!candles || candles.length < 100) continue;const result = computeIndicators(candles, s.symbol, fund.roe, fund.de, fund.mcap, regime, true, false);let adjPassed=result.filters_passed, adjFailed=[...result.failed_filters], adjVerdict=result.verdict;if (isFinancial && adjFailed.includes('D/E <1')) {adjFailed = adjFailed.filter(f => f !== 'D/E <1'); adjPassed++; adjVerdict = adjPassed===8?'BUY_CANDIDATE':'REJECT';}if (adjPassed >= 7) fullPass++;const isHolding = holdingSymbols.has(s.symbol)?1:0;const sectorCount = holdings.filter(h=>h.sector===s.industry).length;const worstH = holdingScores.length>0?holdingScores[holdingScores.length-1]:null;const replaces = worstH && result.momentum_score>(worstH.score||0)+0.5?worstH.symbol:null;await env.DB.prepare('INSERT OR REPLACE INTO opportunities (symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,vol_1y_pct,momentum_score,rsi_14,traded_val_cr,filters_passed,failed_filters,verdict,is_holding,sector_slot_available,rotation_replaces,scan_date,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,date("now"),datetime("now"))').bind(s.symbol,s.industry,fund.roe,fund.de,fund.mcap,result.ltp,result.dma_200,result.dist_52w_pct,result.return_6m_pct,result.vol_1y_pct,result.momentum_score,result.rsi_14,result.traded_val_cr,adjPassed,JSON.stringify(adjFailed),adjVerdict,isHolding,sectorCount<3?1:0,replaces).run();}
+  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('scan_cursor',?)").bind(String((cursor+1)%5)).run();await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('last_scan_date',?)").bind(new Date().toISOString()).run();await env.DB.prepare('DELETE FROM opportunities WHERE scan_date<date("now","-7 days")').run();log.parts.scan = {batch:cursor, scanned, fundPass, fullPass};
+  try { await sendEveningEmail(env, log, holdingScores, holdings, netWorth, portfolioReturnPct, vixVal, brentVal, nifty50, regime); } catch(e) { log.parts.email = {error: e.message}; }
+  log.finished = new Date().toISOString();return log;
 }
 
-// ── UTILS ──
+function computeRSI(closes) {const n = closes.length;if (n < 15) return null;const d=[];for(let i=n-14;i<n;i++)d.push(closes[i]-closes[i-1]);const g=d.filter(x=>x>0),l=d.filter(x=>x<0).map(x=>-x);const ag=g.length?mean(g):0,al=l.length?mean(l):0;return al===0?100:round(100-100/(1+ag/al));}
+
+async function sendEveningEmail(env, log, holdingScores, holdings, netWorth, returnPct, vix, brent, nifty, regime) {
+  const resendKey = (await env.DB.prepare("SELECT value FROM config WHERE key='resend_key'").first())?.value;if (!resendKey) { log.parts.email = {skipped:'no resend_key in config'}; return; }
+  const emailTo = (await env.DB.prepare("SELECT value FROM config WHERE key='resend_email'").first())?.value || 'choudhary.umang05@gmail.com';const today = new Date().toISOString().split('T')[0];const baseline = 650393;const gain = netWorth - baseline;
+  const ranked = holdingScores.map((h,i) => {const holding = holdings.find(x=>x.symbol===h.symbol);const qty = holding?.quantity || 0;const entry = holding?.entry_price || 0;const pnl = entry > 0 ? ((h.ltp/entry-1)*100).toFixed(1) : '0.0';const flag = i >= holdingScores.length - Math.ceil(holdingScores.length*0.2) ? '🔴' : '🟢';return `${flag} ${i+1}. ${h.symbol.padEnd(12)} ${pnl>0?'+':''}${pnl}%  MomScore ${h.score}`;}).join('\n');
+  const alerts = (await env.DB.prepare('SELECT * FROM alerts WHERE resolved=0 ORDER BY severity DESC LIMIT 5').all()).results;const alertText = alerts.map(a => `⚠️ ${a.symbol}: ${a.message}`).join('\n') || 'No active alerts.';
+  const picks = (await env.DB.prepare('SELECT symbol,momentum_score FROM opportunities WHERE verdict="BUY_CANDIDATE" AND is_holding=0 AND scan_date>=date("now","-2 days") ORDER BY momentum_score DESC LIMIT 5').all()).results;const picksText = picks.map(p => `${p.symbol} (${p.momentum_score})`).join(' | ') || 'None today.';
+  const body = `UC-Portfolio Daily Report — ${today}\n\nPortfolio: ₹${(netWorth/100000).toFixed(2)}L (${returnPct>=0?'+':''}${returnPct.toFixed(1)}%) | Gain: ₹${gain>=0?'+':''}${(gain/1000).toFixed(1)}K\nMacro: VIX ${vix||'-'} | Brent $${brent||'-'} | Nifty ${nifty||'-'} | Regime: ${regime}\n\nHoldings Ranked:\n${ranked}\n\nAlerts:\n${alertText}\n\nFresh Picks:\n${picksText}\n\nScan: Batch ${log.parts?.scan?.batch||'-'}/5 | ${log.parts?.scan?.fundPass||0} fundamental pass | ${log.parts?.scan?.fullPass||0} full pass\n`;
+  const resp = await fetch('https://api.resend.com/emails', {method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${resendKey}`},body: JSON.stringify({from: 'UC-Portfolio <onboarding@resend.dev>',to: [emailTo],subject: `[UC-Portfolio] ${today} | ${returnPct>=0?'+':''}${returnPct.toFixed(1)}% | ${holdings.length} positions`,text: body})});
+  const result = await resp.json();log.parts.email = {sent: true, id: result.id};
+}
+
 function mean(a){return a.reduce((s,v)=>s+v,0)/a.length}
 function std(a){const m=mean(a);return Math.sqrt(a.reduce((s,v)=>s+(v-m)**2,0)/(a.length-1))}
 function round(v,d=2){return v!=null?+v.toFixed(d):null}
