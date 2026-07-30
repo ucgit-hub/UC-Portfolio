@@ -408,6 +408,36 @@ async function dailyCron(env) {
   }
   log.parts.holdingsRanked = holdingScores.length;
 
+  // === WATCHLIST INDICATOR PROCESSING (v3.1) ===
+  const watchlistStocks = (await env.DB.prepare(
+    "SELECT w.symbol, w.sector FROM watchlist w WHERE w.symbol NOT IN (SELECT symbol FROM holdings)"
+  ).all()).results;
+  let wlProcessed = 0;
+  for (const w of watchlistStocks) {
+    try {
+      const candles = await fetchYahooCandlesForHolding(w.symbol, "NSE", 365);
+      if (!candles || candles.length < 30) continue;
+      const n2 = candles.length, cl2 = candles.map(c => c.close), hi2 = candles.map(c => c.high), lo2 = candles.map(c => c.low), vo2 = candles.map(c => c.volume), cur2 = cl2[n2 - 1];
+      const r6m2 = n2 > 126 ? (cur2 / cl2[n2 - 127] - 1) * 100 : 0;
+      const vl2 = Math.min(252, n2 - 1);
+      let vy2 = 30;
+      if (vl2 >= 20) { const lr2 = []; for (let i2 = n2 - vl2; i2 < n2; i2++) lr2.push(Math.log(cl2[i2] / cl2[i2 - 1])); vy2 = std(lr2) * Math.sqrt(252) * 100; }
+      const ms2 = round(vy2 > 0 ? (r6m2 / 100) / (vy2 / 100) : 0, 4);
+      const d200_2 = n2 >= 200 ? mean(cl2.slice(-200)) : null, d20_2 = n2 >= 20 ? mean(cl2.slice(-20)) : null;
+      const lb2 = Math.min(252, n2), h52_2 = Math.max(...hi2.slice(-lb2)), l52_2 = Math.min(...lo2.slice(-lb2));
+      const ds2 = round((cur2 / h52_2 - 1) * 100), rsi2 = computeRSI(cl2);
+      let atr2 = null;
+      if (n2 >= 15) { const t2 = []; for (let i2 = n2 - 14; i2 < n2; i2++) t2.push(Math.max(hi2[i2] - lo2[i2], Math.abs(hi2[i2] - cl2[i2 - 1]), Math.abs(lo2[i2] - cl2[i2 - 1]))); atr2 = mean(t2); }
+      let tv2 = null;
+      if (n2 >= 20) { const tvs = []; for (let i2 = n2 - 20; i2 < n2; i2++) tvs.push(cl2[i2] * vo2[i2]); tv2 = round(mean(tvs) / 1e7); }
+      await env.DB.prepare('INSERT OR REPLACE INTO indicators (symbol, ltp, dma_200, dma_20, high_52w, low_52w, dist_52w_pct, return_6m_pct, vol_1y_pct, momentum_score, rsi_14, atr_14, atr_pct, traded_val_cr, above_200_dma, above_20_dma, higher_highs, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))').bind(w.symbol, cur2, round(d200_2), round(d20_2), round(h52_2), round(l52_2), ds2, round(r6m2), round(vy2), ms2, round(rsi2), round(atr2), round(atr2 ? atr2 / cur2 * 100 : null), tv2, d200_2 ? (cur2 > d200_2 ? 1 : 0) : null, d20_2 ? (cur2 > d20_2 ? 1 : 0) : null, null).run();
+      await env.DB.prepare("UPDATE watchlist SET momentum_score=? WHERE symbol=?").bind(ms2, w.symbol).run();
+      wlProcessed++;
+    } catch (e3) { /* skip failed watchlist stock */ }
+  }
+  log.parts.watchlistProcessed = wlProcessed;
+  // === END WATCHLIST PROCESSING ===
+
   const config = Object.fromEntries((await env.DB.prepare("SELECT * FROM config").all()).results.map(c => [c.key, c.value]));
   const cashKite = parseFloat(config.cash_kite || "0"), cashBank = parseFloat(config.cash_bank || "0"), lbQty = parseInt(config.liquidbees_qty || "0"), lbNav = parseFloat(config.liquidbees_nav || "1000");
   let equityValue = 0;
