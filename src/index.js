@@ -454,40 +454,40 @@ async function dailyCron(env) {
     .bind(today, round(equityValue, 0), round(lbQty * lbNav, 0), cashKite, cashBank, round(netWorth, 0), niftyClose, round(portfolioReturnPct), holdings.length, round((lbQty * lbNav + cashKite) / netWorth * 100), niftyClose, nifty500, vixVal, brentVal, round(dayChangePct), round(dayChange, 0)).run();
 
   log.parts.nav = { netWorth: round(netWorth, 0), dayChange: round(dayChange, 0), returnPct: round(portfolioReturnPct) };
-  const cursorRow = await env.DB.prepare("SELECT value FROM config WHERE key='scan_cursor'").first();
-  const cursor = cursorRow ? parseInt(cursorRow.value) : 0;
-  const batchSize = 101;
-  const batchSymbols = (await env.DB.prepare('SELECT symbol,industry FROM nifty500 WHERE series="EQ" ORDER BY symbol LIMIT ? OFFSET ?').bind(batchSize, cursor * batchSize).all()).results;
+
+  // === OPPORTUNITY SCAN v3.2 — fundamentals_cache based ===
+  const fundCandidates = (await env.DB.prepare(
+    'SELECT f.symbol, f.roe, f.de, f.mcap, n.industry FROM fundamentals_cache f JOIN nifty500 n ON f.symbol = n.symbol WHERE f.roe > 15 AND f.de < 1 AND f.mcap > 5000 AND f.mcap < 200000 AND f.in_nifty500 = 1 AND f.symbol NOT IN (SELECT symbol FROM holdings)'
+  ).all()).results;
   let scanned = 0, fundPass = 0, fullPass = 0;
-  for (const s of batchSymbols) {
+  for (const s of fundCandidates) {
     scanned++;
     const isFinancial = FINANCIAL_SECTORS.includes(s.industry);
-    const fund = await fetchYahooFundamentals(s.symbol + ".NS");
-    if (!fund) continue;
-    if (fund.mcap < 5000 || fund.mcap > 200000 || fund.roe <= 15) continue;
-    if (!isFinancial && fund.de >= 1) continue;
+    if (!isFinancial && s.de >= 1) continue;
     fundPass++;
-    const candles = await fetchYahooCandles(s.symbol + ".NS", 365);
+    const candles = await fetchYahooCandlesForHolding(s.symbol, "NSE", 365);
     if (!candles || candles.length < 100) continue;
-    const result = computeIndicators(candles, s.symbol, fund.roe, fund.de, fund.mcap, regime, true, false);
+    const isNifty100 = s.mcap > 100000;
+    const result = computeIndicators(candles, s.symbol, s.roe, s.de, s.mcap, regime, true, isNifty100);
     let adjPassed = result.filters_passed, adjFailed = [...result.failed_filters], adjVerdict = result.verdict;
     if (isFinancial && adjFailed.includes("D/E <1")) {
-      adjFailed = adjFailed.filter(f => f !== "D/E <1");
+      adjFailed = adjFailed.filter((f) => f !== "D/E <1");
       adjPassed++;
       adjVerdict = adjPassed === 8 ? "BUY_CANDIDATE" : "REJECT";
     }
     if (adjPassed >= 7) fullPass++;
     const isHolding = holdingSymbols.has(s.symbol) ? 1 : 0;
-    const sectorCount = holdings.filter(h => h.sector === s.industry).length;
+    const sectorCount = holdings.filter((h) => h.sector === s.industry).length;
     const worstH = holdingScores.length > 0 ? holdingScores[holdingScores.length - 1] : null;
     const replaces = worstH && result.momentum_score > (worstH.score || 0) + 0.5 ? worstH.symbol : null;
-    await env.DB.prepare('INSERT OR REPLACE INTO opportunities (symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,vol_1y_pct,momentum_score,rsi_14,traded_val_cr,filters_passed,failed_filters,verdict,is_holding,sector_slot_available,rotation_replaces,scan_date,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,date("now"),datetime("now"))')
-      .bind(s.symbol, s.industry, fund.roe, fund.de, fund.mcap, result.ltp, result.dma_200, result.dist_52w_pct, result.return_6m_pct, result.vol_1y_pct, result.momentum_score, result.rsi_14, result.traded_val_cr, adjPassed, JSON.stringify(adjFailed), adjVerdict, isHolding, sectorCount < 3 ? 1 : 0, replaces).run();
+    await env.DB.prepare('INSERT OR REPLACE INTO opportunities (symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,vol_1y_pct,momentum_score,rsi_14,traded_val_cr,filters_passed,failed_filters,verdict,is_holding,sector_slot_available,rotation_replaces,scan_date,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,date("now"),datetime("now"))').bind(s.symbol, s.industry, s.roe, s.de, s.mcap, result.ltp, result.dma_200, result.dist_52w_pct, result.return_6m_pct, result.vol_1y_pct, result.momentum_score, result.rsi_14, result.traded_val_cr, adjPassed, JSON.stringify(adjFailed), adjVerdict, isHolding, sectorCount < 3 ? 1 : 0, replaces).run();
+    await env.DB.prepare('INSERT OR REPLACE INTO indicators (symbol, ltp, dma_200, dma_20, high_52w, low_52w, dist_52w_pct, return_6m_pct, vol_1y_pct, momentum_score, rsi_14, atr_14, atr_pct, traded_val_cr, above_200_dma, above_20_dma, higher_highs, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))').bind(s.symbol, result.ltp, result.dma_200, result.dma_20, result.high_52w, result.low_52w, result.dist_52w_pct, result.return_6m_pct, result.vol_1y_pct, result.momentum_score, result.rsi_14, result.atr_14, result.atr_pct, result.traded_val_cr, result.above_200_dma, result.above_20_dma, result.higher_highs).run();
   }
-  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('scan_cursor',?)").bind(String((cursor + 1) % 5)).run();
-  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('last_scan_date',?)").bind(new Date().toISOString()).run();
+  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('last_scan_date',?)").bind((new Date()).toISOString()).run();
   await env.DB.prepare('DELETE FROM opportunities WHERE scan_date<date("now","-14 days")').run();
-  log.parts.scan = { batch: cursor, scanned, fundPass, fullPass };
+  log.parts.scan = { mode: "fundamentals_cache", scanned, fundPass, fullPass };
+  // === END OPPORTUNITY SCAN v3.2 ===
+
   try { await sendEveningEmail(env, log, holdingScores, holdings, netWorth, portfolioReturnPct, vixVal, brentVal, niftyClose, regime); }
   catch (e) { log.parts.email = { error: e.message }; }
   log.finished = new Date().toISOString();
