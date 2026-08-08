@@ -1,121 +1,134 @@
 # UC-Portfolio — Momentum Dashboard & API
 
-Cloudflare Worker + D1 database powering a portfolio dashboard and analysis API for the UC_MOMENTUM trading system.
+Cloudflare Worker + D1 database powering the UC_MOMENTUM portfolio dashboard,
+strategy evaluation and analysis API.
 
-## Architecture 
+## Architecture
 
+```text
+Market / benchmark data → Cloudflare Worker → D1 database
+                               ↓
+                         Dashboard + API
 ```
-Yahoo Finance (free) → Cloudflare Worker → D1 Database
-                              ↓
-                  Dashboard (HTML)  +  API (JSON for Claude)
+
+The Worker + D1 own candle-derived calculations and deterministic UC_MOMENTUM
+strategy state. Broker data remains authoritative for holdings, quantities,
+orders, trades and GTT execution state.
+
+## UC_MOMENTUM v1.1 release
+
+v1.1 moves deterministic strategy rules into `src/strategy.js` and adds:
+
+- session-aware regime logic and fail-safe handling;
+- MFI, RS20/RS60, higher-low, sufficiency and universe-ranking fields;
+- real Nifty-100 membership support and financial-sector quality substitutes;
+- forward-only GTT strategy floors, leader/giveback/pyramid/time-review state;
+- review-only rotation logic rather than rank-only automatic replacement;
+- regime-aware liquidity targets;
+- dry-run refresh support that suppresses D1 writes.
+
+Notifications are intentionally outside this release and are not a deployment
+dependency.
+
+## Runtime files
+
+```text
+src/index.js          Cloudflare Worker entry point
+src/strategy.js       Pure deterministic v1.1 strategy logic
+src/dashboard.html    Runtime dashboard imported by src/index.js
+wrangler.toml         Worker, cron and D1 binding
 ```
 
-## Quick Setup
+**Important:** the repository-root `dashboard.html` is a legacy/reference copy.
+The Worker imports `src/dashboard.html`; edit that file for production UI changes.
+The root copy is not part of the Worker runtime.
 
-### 1. Prerequisites
-- Node.js 18+
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
+## D1 and migrations
+
+`wrangler.toml` binds `DB` to **`uc-portfolio-db`**. Production migration is an
+EXPAND → deploy → verify → CONTRACT sequence:
+
+```text
+migrations/000_integrity_snapshot.sql  broker-owned pre-change integrity snapshot
+migrations/001_v11_expand.sql          additive/backward-compatible v1.1 schema
+migrations/002_v11_contract.sql        later cleanup after v1.1 is proven stable
+migrations/003_integrity_verify.sql     integrity verification after refresh
+```
+
+`001_v11_expand.sql` deliberately preserves the legacy gate and rotation columns
+needed by the currently deployed Worker. `002_v11_contract.sql` must not run
+until v1.1 is live and verified.
+
+`schema.sql` is a **historical bootstrap reference**, not an authoritative copy
+of the current production schema. `seed.sql` is intentionally empty and must
+not be used to recreate production portfolio state. Production backups/exports
+belong outside GitHub.
+
+See `DEPLOY.md` for the controlled production sequence. Neither migration is an
+application startup migration.
+
+## Development
+
+Prerequisites: Node.js 18+ and Wrangler.
 
 ```bash
 npm install -g wrangler
 wrangler login
+wrangler dev
 ```
 
-### 2. Create D1 Database
+Do not use `schema.sql` or `seed.sql` as a production initialization shortcut.
+The old `db:init` script has been removed.
+
+## Tests
+
+Existing strategy/pre-production/freshness/cron coverage plus release-engineering
+checks live under `test/`.
 
 ```bash
-wrangler d1 create uc-portfolio-db
+node test/unit.test.mjs
+node test/preprod.test.mjs
+node test/freshness.test.mjs
+sed 's|^import DASHBOARD_HTML.*|const DASHBOARD_HTML="";|' src/index.js > src/index.build.js
+node test/cron.dryrun.mjs
+rm src/index.build.js
+python3 test/schema_compat.py
+node test/dashboard.test.mjs
 ```
 
-Copy the `database_id` from the output and paste it into `wrangler.toml`.
+The cron D1 mock validates SQL placeholder/bind arity, so mismatched `.bind()`
+arguments fail the test rather than being silently accepted.
 
-### 3. Initialize Schema + Seed Data
+## API endpoints
 
-```bash
-wrangler d1 execute uc-portfolio-db --file=./schema.sql
-wrangler d1 execute uc-portfolio-db --file=./seed.sql
-```
-
-### 4. Deploy
-
-```bash
-wrangler deploy
-```
-
-Your dashboard is live at: `https://uc-portfolio.<your-subdomain>.workers.dev`
-
-## API Endpoints
-
-| Endpoint | Method | Description | Used By |
-|---|---|---|---|
-| `/` | GET | Dashboard HTML | Browser |
-| `/api/portfolio` | GET | Full portfolio snapshot | Claude |
-| `/api/holdings` | GET | All holdings with indicators | Claude |
-| `/api/trades` | GET | Trade history | Dashboard |
-| `/api/alerts` | GET | Active alerts | Dashboard + Claude |
-| `/api/watchlist` | GET | Pipeline candidates | Dashboard |
-| `/api/nav` | GET | Historical NAV | Dashboard chart |
-| `/api/macro` | GET | Regime + macro state | Claude |
-| `/api/scan` | POST | Run 8-filter scanner | Claude |
-| `/api/refresh` | GET | Manual data refresh | Admin |
-
-### Scan endpoint example
-```bash
-curl -X POST https://uc-portfolio.*.workers.dev/api/scan \
-  -H "Content-Type: application/json" \
-  -d '{"symbol":"GABRIEL","roe":34.7,"de":0.11,"mcap":20397,"regime":"NORMAL"}'
-```
-
-## Cron Schedule
-
-Daily at **4:15 PM IST** (10:45 UTC), the worker:
-1. Fetches latest candles from Yahoo Finance for all holdings
-2. Computes indicators (DMA, RSI, ATR, etc.)
-3. Updates D1 database
-4. Dashboard reflects new data on next page load
-
-## GitHub Workflow
-
-```bash
-git init
-git add .
-git commit -m "Initial UC-Portfolio dashboard"
-git remote add origin https://github.com/YOUR_USERNAME/uc-portfolio.git
-git push -u origin main
-```
-
-### Auto-deploy on push (optional)
-Connect your GitHub repo to Cloudflare:
-1. Go to Cloudflare Dashboard → Workers → your worker
-2. Settings → Builds → Connect to Git
-3. Select your repo — deploys on every push to main
-
-## File Structure
-
-```
-uc-portfolio/
-├── wrangler.toml          # Worker config + D1 binding + cron
-├── schema.sql             # Database schema
-├── seed.sql               # Initial portfolio data
-├── src/
-│   ├── index.js           # Worker: routes + API + scanner + cron
-│   └── dashboard.html     # Single-page dashboard (served by worker)
-└── README.md
-```
-
-## Data Sources
-
-| Data | Source | Refresh |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| Candle OHLCV | Yahoo Finance HTTP API | Daily cron |
-| Fundamentals (ROE, D/E) | Screener.in CSV (manual) | On new scan |
-| Portfolio state | D1 (updated via API) | On trade |
-| Macro (Brent, VIX) | Entered via Claude or manual | Per session |
+| `/` / `/dashboard` | GET | Dashboard |
+| `/api/dashboard-data` | GET | Consolidated dashboard payload |
+| `/api/portfolio` | GET | Portfolio snapshot |
+| `/api/holdings` | GET | Holdings + strategy state |
+| `/api/trades` | GET | Trade history |
+| `/api/alerts` | GET | Active alerts |
+| `/api/opportunities` | GET | Scanned opportunities |
+| `/api/watchlist` | GET | Watchlist |
+| `/api/nav` | GET | NAV history |
+| `/api/macro` | GET | Regime/macro state |
+| `/api/ranking` | GET | Momentum ranking |
+| `/api/scan-status` | GET | Scanner status |
+| `/api/scan` | POST | On-demand candidate scan |
+| `/api/refresh?dry=1` | GET | Full refresh with writes suppressed |
+| `/api/refresh` | GET | Real refresh |
+| `/api/kite-sync` | POST | Broker/manual authoritative inputs |
 
-## Token Savings
+## Cron
 
-| Operation | Before (Kite through chat) | After (Worker API) |
-|---|---|---|
-| Morning scan 11 stocks | ~80,000 tokens | ~2,000 tokens |
-| Validate 7 candidates | ~50,000 tokens | ~1,500 tokens |
-| After-market audit | ~60,000 tokens | ~1,000 tokens |
+`wrangler.toml` schedules weekdays at 10:45 UTC / 4:15 PM IST. The scheduled
+handler refreshes market data, recomputes strategy state, updates NAV/liquidity
+and scans the eligible universe.
+
+## Deployment model
+
+The repository has historically been used with Cloudflare native Git builds.
+Treat any push to `main` as potentially production-impacting. Prepare releases
+on a release branch, validate there, and coordinate D1 + Worker rollout before
+merging the tested production commit into `main`.

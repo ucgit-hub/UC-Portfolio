@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:init": "wrangler d1 execute uc-portfolio-db --file=./schema.sql && wrangler d1 execute uc-portfolio-db --file=./seed.sql"
-  }
+    "test:unit": "node test/unit.test.mjs",
+    "test:preprod": "node test/preprod.test.mjs",
+    "test:freshness": "node test/freshness.test.mjs"
+  },
+  "type": "module"
 }

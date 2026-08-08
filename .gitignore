@@ -1,4 +1,24 @@
 node_modules/
 .wrangler/
 .dev.vars
+.env
+.env.*
 *.log
+
+# Production backups / exports must never enter GitHub.
+backup/
+backups/
+exports/
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+*.bak.sql
+*_backup_*.sql
+*_export_*.sql
+*_snapshot_*.sql
+
+# Local test/build artifacts
+src/index.build.js
+__pycache__/
+*.pyc

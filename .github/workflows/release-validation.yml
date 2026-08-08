@@ -1,0 +1,50 @@
+name: UC Momentum v1.1 Release Validation
+
+on:
+  push:
+    branches:
+      - release/uc-momentum-v1.1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Strategy unit tests
+        run: node test/unit.test.mjs
+
+      - name: Pre-production tests
+        run: node test/preprod.test.mjs
+
+      - name: Session freshness tests
+        run: node test/freshness.test.mjs
+
+      - name: Build testable Worker module
+        run: sed 's|^import DASHBOARD_HTML.*|const DASHBOARD_HTML="";|' src/index.js > src/index.build.js
+
+      - name: Cron dry-run and SQL bind validation
+        run: node test/cron.dryrun.mjs
+
+      - name: Schema compatibility proofs
+        run: python3 test/schema_compat.py
+
+      - name: Dashboard assertions
+        run: node test/dashboard.test.mjs
+
+      - name: Worker syntax check
+        run: node --check src/index.js
+
+      - name: Ensure no generated Worker remains
+        if: always()
+        run: rm -f src/index.build.js

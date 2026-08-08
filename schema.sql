@@ -1,7 +1,11 @@
--- UC-Portfolio D1 Schema
--- Run: wrangler d1 execute uc-portfolio-db --file=./schema.sql
+-- HISTORICAL BOOTSTRAP REFERENCE ONLY — NOT THE AUTHORITATIVE PRODUCTION SCHEMA.
+--
+-- DO NOT execute this file against production. The live uc-portfolio-db schema
+-- evolved beyond this early bootstrap definition before UC_MOMENTUM v1.1.
+-- Reconcile any future bootstrap schema against a read-only export of the live
+-- D1 schema first. v1.1 changes are managed through migrations/.
 
--- Portfolio holdings (source of truth)
+-- Portfolio holdings (historical bootstrap definition)
 CREATE TABLE IF NOT EXISTS holdings (
   symbol TEXT PRIMARY KEY,
   exchange TEXT DEFAULT 'NSE',
@@ -24,7 +28,6 @@ CREATE TABLE IF NOT EXISTS holdings (
   notes TEXT
 );
 
--- Daily NAV snapshots (for performance chart)
 CREATE TABLE IF NOT EXISTS daily_nav (
   date TEXT PRIMARY KEY,
   equity_value REAL,
@@ -39,12 +42,11 @@ CREATE TABLE IF NOT EXISTS daily_nav (
   cash_ratio_pct REAL
 );
 
--- Trade log (every entry/exit)
 CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   symbol TEXT NOT NULL,
   trade_date TEXT NOT NULL,
-  trade_type TEXT NOT NULL, -- BUY, SELL, STOP, BOOK, EXIT
+  trade_type TEXT NOT NULL,
   quantity INTEGER NOT NULL,
   price REAL NOT NULL,
   value REAL NOT NULL,
@@ -55,7 +57,6 @@ CREATE TABLE IF NOT EXISTS trades (
   gtt_triggered INTEGER DEFAULT 0
 );
 
--- Candle cache (daily OHLCV from Yahoo)
 CREATE TABLE IF NOT EXISTS candle_cache (
   symbol TEXT NOT NULL,
   date TEXT NOT NULL,
@@ -67,7 +68,6 @@ CREATE TABLE IF NOT EXISTS candle_cache (
   PRIMARY KEY (symbol, date)
 );
 
--- Computed indicators (refreshed daily at 4:15 PM)
 CREATE TABLE IF NOT EXISTS indicators (
   symbol TEXT PRIMARY KEY,
   ltp REAL,
@@ -89,7 +89,6 @@ CREATE TABLE IF NOT EXISTS indicators (
   updated_at TEXT
 );
 
--- Watchlist / pipeline candidates
 CREATE TABLE IF NOT EXISTS watchlist (
   symbol TEXT PRIMARY KEY,
   sector TEXT,
@@ -103,24 +102,22 @@ CREATE TABLE IF NOT EXISTS watchlist (
   results_date TEXT,
   entry_zone_low REAL,
   entry_zone_high REAL,
-  status TEXT DEFAULT 'MONITORING', -- DEPLOY_READY, BLOCKED_RESULTS, BLOCKED_RSI, MONITORING
+  status TEXT DEFAULT 'MONITORING',
   notes TEXT,
   updated_at TEXT
 );
 
--- Alerts / actions to monitor
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at TEXT NOT NULL,
-  alert_type TEXT NOT NULL, -- GTT_NEAR, RESULTS_DUE, GIVEBACK, MILESTONE_DUE, REGIME_CHANGE, LEADER_CHANGE
+  alert_type TEXT NOT NULL,
   symbol TEXT,
-  severity TEXT DEFAULT 'INFO', -- INFO, WARNING, CRITICAL
+  severity TEXT DEFAULT 'INFO',
   message TEXT NOT NULL,
   resolved INTEGER DEFAULT 0,
   resolved_at TEXT
 );
 
--- Macro state (latest regime indicators)
 CREATE TABLE IF NOT EXISTS macro_state (
   id INTEGER PRIMARY KEY DEFAULT 1,
   brent_price REAL,
@@ -137,13 +134,7 @@ CREATE TABLE IF NOT EXISTS macro_state (
   updated_at TEXT
 );
 
--- Config / constants
 CREATE TABLE IF NOT EXISTS config (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-
-INSERT OR REPLACE INTO config VALUES ('baseline', '650393');
-INSERT OR REPLACE INTO config VALUES ('start_date', '2026-03-20');
-INSERT OR REPLACE INTO config VALUES ('regime', 'NORMAL');
-INSERT OR REPLACE INTO config VALUES ('version', '2.0');
