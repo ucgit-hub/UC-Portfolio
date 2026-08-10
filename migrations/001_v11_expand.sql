@@ -3,10 +3,11 @@
 -- Safe deployment property: the currently deployed pre-v1.1 Worker must keep
 -- working after this migration. Retired v1.0 columns are deliberately preserved.
 --
+-- D1/wrangler executes SQL files in its own transaction context. Do not add
+-- explicit BEGIN TRANSACTION / COMMIT statements to this file.
+--
 -- DO NOT run against an unknown schema. First verify the live D1 schema matches
 -- the pre-v1.1 assumptions documented in DEPLOY.md.
-
-BEGIN TRANSACTION;
 
 -- indicators: v1.1 technicals, relative strength, sufficiency and ranking
 ALTER TABLE indicators ADD COLUMN mfi_14 REAL;
@@ -104,5 +105,3 @@ UPDATE holdings
 -- this config key as a no-op, so EXPAND remains backward-compatible.
 DELETE FROM config WHERE key='resend_key';
 INSERT OR REPLACE INTO config (key,value) VALUES ('version','v1.1-expand');
-
-COMMIT;
