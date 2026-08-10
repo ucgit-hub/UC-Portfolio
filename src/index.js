@@ -262,7 +262,7 @@ async function dailyCron(env, opts = {}) {
     const candles = await loadCandles(h.symbol, h.exchange, env, errors);
     if (!candles || candles.length < 30) {
       perHolding.push({ symbol: h.symbol, error: "no_data" });
-      await raiseAlert(DB, h.symbol, "CRITICAL", "Price data unavailable — indicators stale, manual check required");
+      await raiseAlert(DB, "DATA_STALE", h.symbol, "CRITICAL", "Price data unavailable — indicators stale, manual check required");
       continue;
     }
     const s = series(candles);
@@ -297,7 +297,7 @@ async function dailyCron(env, opts = {}) {
     `SELECT f.symbol,f.roe,f.de,f.mcap,f.crar,f.gross_npa,f.net_npa,n.industry,
             COALESCE(n.in_nifty100,0) AS in_nifty100
      FROM fundamentals_cache f JOIN nifty500 n ON f.symbol=n.symbol
-     WHERE f.roe>15 AND f.de<1 AND f.mcap>5000 AND f.mcap<200000 AND f.in_nifty500=1`).all()).results;
+     WHERE f.roe>15 AND f.mcap>5000 AND f.mcap<200000 AND f.in_nifty500=1`).all()).results;
 
   let scanned = 0, buyCandidates = 0;
   for (const s0 of fundCandidates) {
@@ -444,13 +444,13 @@ async function dailyCron(env, opts = {}) {
       fundamentalsIncomplete ? "FUNDAMENTALS_DATA_INCOMPLETE" : "OK", p.symbol).run();
 
     for (const a of cov.coverage_alerts) {
-      await raiseAlert(DB, p.symbol, a === "NO_GTT" ? "CRITICAL" : "WARNING", `GTT coverage: ${a}`);
+      await raiseAlert(DB, "GTT_COVERAGE", p.symbol, a === "NO_GTT" ? "CRITICAL" : "WARNING", `GTT coverage: ${a}`);
     }
-    if (gb.giveback_alert) await raiseAlert(DB, p.symbol, "WARNING", `Giveback review: ${(gb.giveback_reasons || []).join("; ")}`);
-    if (stage?.stage_advanced) await raiseAlert(DB, p.symbol, "INFO", `GTT stage advanced to ${stage.gtt_stage} — raise stop to ${stage.min_stop} (limit ${stage.limit_price})`);
-    if (rot.rotation_status === "ROTATION_REVIEW_ELIGIBLE") await raiseAlert(DB, p.symbol, "WARNING", `Rotation REVIEW: ${rot.deterioration_signals} deterioration signals — requires superior replacement + approval`);
-    if (tp.time_check) await raiseAlert(DB, p.symbol, "INFO", `Day ${tp.day} ${tp.time_check}`);
-    if (fundamentalsIncomplete) await raiseAlert(DB, p.symbol, "INFO",
+    if (gb.giveback_alert) await raiseAlert(DB, "GIVEBACK", p.symbol, "WARNING", `Giveback review: ${(gb.giveback_reasons || []).join("; ")}`);
+    if (stage?.stage_advanced) await raiseAlert(DB, "GTT_STAGE", p.symbol, "INFO", `GTT stage advanced to ${stage.gtt_stage} — raise stop to ${stage.min_stop} (limit ${stage.limit_price})`);
+    if (rot.rotation_status === "ROTATION_REVIEW_ELIGIBLE") await raiseAlert(DB, "ROTATION_REVIEW", p.symbol, "WARNING", `Rotation REVIEW: ${rot.deterioration_signals} deterioration signals — requires superior replacement + approval`);
+    if (tp.time_check) await raiseAlert(DB, "TIME_REVIEW", p.symbol, "INFO", `Day ${tp.day} ${tp.time_check}`);
+    if (fundamentalsIncomplete) await raiseAlert(DB, "FUNDAMENTALS_INCOMPLETE", p.symbol, "INFO",
       "FUNDAMENTALS_DATA_INCOMPLETE — existing holding: protection retained, no forced exit, pyramiding barred until a fresh Screener export revalidates it");
 
     holdingState.push({ symbol: p.symbol, rank: portfolioRank, leader: state.leader_state,
@@ -507,10 +507,10 @@ const FINANCIAL_INDUSTRIES = new Set(["Financial Services"]);
 
 function intBool(v) { return v == null ? null : v === 1 || v === true; }
 
-async function raiseAlert(DB, symbol, severity, message) {
+async function raiseAlert(DB, alertType, symbol, severity, message) {
   await DB.prepare(
-    "INSERT INTO alerts (symbol,severity,message,resolved,created_at) VALUES (?,?,?,0,datetime('now'))"
-  ).bind(symbol, severity, message).run();
+    "INSERT INTO alerts (alert_type,symbol,severity,message,resolved,created_at) VALUES (?,?,?,?,0,datetime('now'))"
+  ).bind(alertType, symbol, severity, message).run();
 }
 
 // Dry-run guard: swallows every mutating statement, records it, leaves D1 untouched.
@@ -574,7 +574,7 @@ async function handleScanStatus(env) {
     env.DB.prepare("SELECT value FROM config WHERE key='last_scan_date'").first(),
     env.DB.prepare("SELECT COUNT(*) c FROM opportunities WHERE scan_date>=date('now','-14 days')").first(),
     env.DB.prepare("SELECT COUNT(*) c FROM opportunities WHERE verdict='BUY_CANDIDATE' AND scan_date>=date('now','-14 days')").first(),
-    env.DB.prepare("SELECT COUNT(*) c FROM fundamentals_cache WHERE in_nifty500=1 AND roe>15 AND de<1 AND mcap>5000 AND mcap<200000").first(),
+    env.DB.prepare("SELECT COUNT(*) c FROM fundamentals_cache WHERE in_nifty500=1 AND roe>15 AND mcap>5000 AND mcap<200000").first(),
   ]);
   return json({ lastScanDate: lastRun?.value || "never", eligibleUniverse: eligible?.c || 0,
     stocksScanned: total?.c || 0, candidatesFound: candidates?.c || 0 });
@@ -623,7 +623,16 @@ async function handleKiteSync(request, env) {
   if (daily_nav) {
     const d = daily_nav;
     await env.DB.prepare(
-      "INSERT OR REPLACE INTO daily_nav (date,equity_value,liquidbees_value,cash_kite,cash_bank,net_worth,nifty_close,portfolio_return_pct,positions_count,cash_ratio_pct,nifty50_close,nifty500_close,vix_close,brent_close,day_change_pct,day_change_abs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+      `INSERT INTO daily_nav (date,equity_value,liquidbees_value,cash_kite,cash_bank,net_worth,nifty_close,portfolio_return_pct,positions_count,cash_ratio_pct,nifty50_close,nifty500_close,vix_close,brent_close,day_change_pct,day_change_abs)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(date) DO UPDATE SET
+         equity_value=excluded.equity_value,liquidbees_value=excluded.liquidbees_value,
+         cash_kite=excluded.cash_kite,cash_bank=excluded.cash_bank,net_worth=excluded.net_worth,
+         nifty_close=excluded.nifty_close,portfolio_return_pct=excluded.portfolio_return_pct,
+         positions_count=excluded.positions_count,cash_ratio_pct=excluded.cash_ratio_pct,
+         nifty50_close=excluded.nifty50_close,nifty500_close=excluded.nifty500_close,
+         vix_close=excluded.vix_close,brent_close=excluded.brent_close,
+         day_change_pct=excluded.day_change_pct,day_change_abs=excluded.day_change_abs`
     ).bind(d.date, d.equity_value, d.liquidbees_value, d.cash_kite, d.cash_bank, d.net_worth,
       d.nifty_close, d.portfolio_return_pct, d.positions_count, d.cash_ratio_pct,
       d.nifty50_close, d.nifty500_close, d.vix_close, d.brent_close, d.day_change_pct, d.day_change_abs).run();

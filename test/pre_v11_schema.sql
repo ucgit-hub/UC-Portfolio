@@ -24,6 +24,11 @@ CREATE TABLE trades (
   trade_type TEXT, quantity INTEGER, price REAL, value REAL, pnl REAL DEFAULT 0,
   pnl_pct REAL DEFAULT 0, reason TEXT, tag TEXT, gtt_triggered INTEGER DEFAULT 0
 );
+
+CREATE TABLE candle_cache (
+  symbol TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL,
+  close REAL, volume INTEGER, PRIMARY KEY(symbol,date)
+);
 CREATE TABLE indicators (
   symbol TEXT PRIMARY KEY, ltp REAL, dma_200 REAL, dma_20 REAL, high_52w REAL,
   low_52w REAL, dist_52w_pct REAL, return_6m_pct REAL, vol_1y_pct REAL,
@@ -38,8 +43,8 @@ CREATE TABLE watchlist (
   status TEXT, notes TEXT, updated_at TEXT
 );
 CREATE TABLE alerts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, alert_type TEXT,
-  symbol TEXT, severity TEXT, message TEXT, resolved INTEGER DEFAULT 0,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, alert_type TEXT NOT NULL,
+  symbol TEXT, severity TEXT, message TEXT NOT NULL, resolved INTEGER DEFAULT 0,
   resolved_at TEXT
 );
 CREATE TABLE macro_state (

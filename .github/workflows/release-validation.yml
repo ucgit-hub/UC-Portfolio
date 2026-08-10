@@ -39,6 +39,12 @@ jobs:
       - name: Schema compatibility proofs
         run: python3 test/schema_compat.py
 
+      - name: Hotfix regression tests
+        run: node test/hotfix.test.mjs
+
+      - name: Live-shape SQLite compatibility
+        run: python3 test/live_hotfix_compat.py
+
       - name: Dashboard assertions
         run: node test/dashboard.test.mjs
 

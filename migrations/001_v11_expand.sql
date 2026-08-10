@@ -6,7 +6,6 @@
 -- DO NOT run against an unknown schema. First verify the live D1 schema matches
 -- the pre-v1.1 assumptions documented in DEPLOY.md.
 
-PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 
 -- indicators: v1.1 technicals, relative strength, sufficiency and ranking
@@ -70,7 +69,6 @@ ALTER TABLE opportunities ADD COLUMN vol_threshold_cr REAL;
 ALTER TABLE opportunities ADD COLUMN band_used_pct REAL;
 ALTER TABLE opportunities ADD COLUMN credit_test TEXT;
 ALTER TABLE opportunities ADD COLUMN data_sufficiency TEXT;
-ALTER TABLE opportunities ADD COLUMN universe_rank INTEGER;
 
 -- discretionary action / rotation ledger
 CREATE TABLE IF NOT EXISTS action_log (
@@ -108,4 +106,3 @@ DELETE FROM config WHERE key='resend_key';
 INSERT OR REPLACE INTO config (key,value) VALUES ('version','v1.1-expand');
 
 COMMIT;
-PRAGMA foreign_keys=ON;
