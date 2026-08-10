@@ -14,14 +14,23 @@ CONTRACT rollout. Run commands from the repository root and target the D1
 - Confirm how Cloudflare Git builds treat the release branch and `main` before
   any push/merge that could trigger a production deployment.
 - Keep D1 exports and any broker/portfolio recovery data **outside GitHub**.
+- Keep Cloudflare builds for non-production branches disabled during release
+  preparation; `main` remains the production branch.
 
-## 1. Backup / rollback point
+## 1. Exact rollback point
 
-Record the current D1 Time Travel state/bookmark and export the remote database
-to a secure local path outside this repository. Example target naming only:
+Immediately before EXPAND, retrieve and privately record the **current D1 Time
+Travel bookmark**. Do not substitute an approximate/future wall-clock timestamp.
 
 ```bash
 npx wrangler d1 time-travel info uc-portfolio-db
+```
+
+Cloudflare Time Travel is always on for supported production D1 databases. The
+bookmark returned above is the exact pre-EXPAND rollback target. Optionally also
+export the remote database to a secure local path outside this repository:
+
+```bash
 npx wrangler d1 export uc-portfolio-db --remote --output=/secure/path/uc-portfolio-db-pre-v11.sql
 ```
 
@@ -35,6 +44,7 @@ npx wrangler d1 execute uc-portfolio-db --remote --file=migrations/000_integrity
 ```
 
 Record the returned aggregate values privately. Do not paste them into GitHub.
+The snapshot SQL is written to respect D1's five-term compound-SELECT limit.
 
 ## 3. EXPAND — additive/backward-compatible schema
 
@@ -75,7 +85,8 @@ npx wrangler d1 execute uc-portfolio-db --remote --file=migrations/003_integrity
 ```
 
 Broker-owned comparison queries must show no changes. Strategy fields may still
-be unpopulated until the first real refresh.
+be unpopulated until the first real refresh. Aggregate verification is split to
+respect D1's five-term compound-SELECT limit.
 
 ## 7. First real refresh
 
@@ -120,8 +131,8 @@ Run v1.1 smoke/integrity checks again.
 
 - **Before CONTRACT:** prefer Worker rollback while retaining the additive
   EXPAND schema; it is designed to remain compatible with the old Worker.
-- If database state itself is damaged, restore using the recorded D1 Time Travel
-  point / secure export according to Cloudflare operational procedures.
+- If database state itself is damaged, restore using the exact recorded D1 Time
+  Travel bookmark / secure export according to Cloudflare operational procedures.
 - **After CONTRACT:** database rollback and Worker rollback must be coordinated,
   because the legacy Worker requires columns CONTRACT removes.
 - Broker/execution state remains authoritative outside the strategy engine; do
