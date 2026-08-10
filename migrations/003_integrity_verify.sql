@@ -4,6 +4,8 @@
 --
 -- daily_nav row count is NOT checked: a successful refresh legitimately
 -- inserts or updates today's NAV snapshot.
+-- D1 limits compound SELECT statements to 5 terms, so aggregate checks are
+-- split into a 5-term block plus a separate cost-basis check.
 
 -- 1. Broker-owned holdings fields must be byte-identical.
 SELECT 'BROKER_FIELD_CHANGED' AS check_name, h.symbol,
@@ -30,7 +32,7 @@ UNION ALL
 SELECT 'HOLDING_SET_CHANGED', symbol, 'appeared_new'
 FROM holdings WHERE symbol NOT IN (SELECT symbol FROM _integrity_snapshot);
 
--- 3. Row counts and broker aggregates must match exactly.
+-- 3a. First five row-count / broker aggregates must match exactly.
 SELECT 'COUNT_MISMATCH' AS check_name, c.tbl, c.n AS was, x.n AS now
 FROM _integrity_counts c JOIN (
   SELECT 'holdings' AS tbl, COUNT(*) AS n FROM holdings
@@ -38,9 +40,16 @@ FROM _integrity_counts c JOIN (
   UNION ALL SELECT 'trades_pnl_x100', CAST(ROUND(SUM(pnl)*100) AS INTEGER) FROM trades
   UNION ALL SELECT 'gtt_id_sum', SUM(COALESCE(gtt_id,0)) FROM holdings
   UNION ALL SELECT 'qty_sum', SUM(COALESCE(quantity,0)) FROM holdings
-  UNION ALL SELECT 'cost_x100', CAST(ROUND(SUM(quantity*entry_price)*100) AS INTEGER) FROM holdings
 ) x ON c.tbl = x.tbl
 WHERE IFNULL(c.n,-1) != IFNULL(x.n,-1);
+
+-- 3b. Cost basis is checked separately to stay within D1's compound-select limit.
+SELECT 'COUNT_MISMATCH' AS check_name, c.tbl, c.n AS was,
+       CAST(ROUND(SUM(h.quantity*h.entry_price)*100) AS INTEGER) AS now
+FROM _integrity_counts c CROSS JOIN holdings h
+WHERE c.tbl='cost_x100'
+GROUP BY c.tbl, c.n
+HAVING IFNULL(c.n,-1) != IFNULL(CAST(ROUND(SUM(h.quantity*h.entry_price)*100) AS INTEGER),-1);
 
 -- 4. A strategy stop must never sit below the live broker trigger.
 SELECT 'STOP_BELOW_LIVE_TRIGGER' AS check_name, symbol, gtt_trigger, gtt_min_stop
@@ -48,7 +57,7 @@ FROM holdings
 WHERE gtt_trigger IS NOT NULL AND gtt_min_stop IS NOT NULL
   AND gtt_min_stop < gtt_trigger - 0.01;
 
--- 5. Stage must never have regressed below its pre-deploy value.
+-- 5. Stage must always be one of the sanctioned values.
 SELECT 'STAGE_REGRESSED' AS check_name, symbol, gtt_stage FROM holdings
 WHERE gtt_stage NOT IN ('ENTRY_RISK','RISK_REDUCED','CAPITAL_PROTECTED',
        'PROFIT_LOCKED','PARTIAL_BOOK_DUE','RUNNER','PROTECTED_WINNER');
