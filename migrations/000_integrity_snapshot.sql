@@ -4,6 +4,9 @@
 -- momentum_rank, giveback_alert, pyramid_eligibility, rotation_status,
 -- time_check, coverage_alerts, fundamentals_status) are DELIBERATELY excluded:
 -- those are expected to change on the first refresh.
+--
+-- D1 limits compound SELECT statements to 5 terms, so aggregate capture is
+-- intentionally split into a 5-term INSERT plus one final INSERT.
 
 DROP TABLE IF EXISTS _integrity_snapshot;
 CREATE TABLE _integrity_snapshot AS
@@ -12,12 +15,16 @@ SELECT symbol, exchange, quantity, entry_price, entry_date,
 FROM holdings;
 
 DROP TABLE IF EXISTS _integrity_counts;
-CREATE TABLE _integrity_counts AS
-SELECT 'holdings' AS tbl, COUNT(*) AS n FROM holdings
+CREATE TABLE _integrity_counts (tbl TEXT, n INTEGER);
+
+INSERT INTO _integrity_counts (tbl, n)
+SELECT 'holdings', COUNT(*) FROM holdings
 UNION ALL SELECT 'trades', COUNT(*) FROM trades
 UNION ALL SELECT 'trades_pnl_x100', CAST(ROUND(SUM(pnl)*100) AS INTEGER) FROM trades
 UNION ALL SELECT 'gtt_id_sum', SUM(COALESCE(gtt_id,0)) FROM holdings
-UNION ALL SELECT 'qty_sum', SUM(COALESCE(quantity,0)) FROM holdings
-UNION ALL SELECT 'cost_x100', CAST(ROUND(SUM(quantity*entry_price)*100) AS INTEGER) FROM holdings;
+UNION ALL SELECT 'qty_sum', SUM(COALESCE(quantity,0)) FROM holdings;
+
+INSERT INTO _integrity_counts (tbl, n)
+SELECT 'cost_x100', CAST(ROUND(SUM(quantity*entry_price)*100) AS INTEGER) FROM holdings;
 
 SELECT tbl, n FROM _integrity_counts ORDER BY tbl;
