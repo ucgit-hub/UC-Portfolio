@@ -31,8 +31,10 @@ jobs:
       - name: Session freshness tests
         run: node test/freshness.test.mjs
 
-      - name: Build testable Worker module
-        run: sed 's|^import DASHBOARD_HTML.*|const DASHBOARD_HTML="";|' src/index.js > src/index.build.js
+      - name: Build testable Worker modules
+        run: |
+          sed 's|^import DASHBOARD_HTML.*|const DASHBOARD_HTML="";|' src/index.js > src/index.build.js
+          sed 's|from "./index.js"|from "./index.build.js"|' src/queue-worker.js > src/queue-worker.build.js
 
       - name: Cron dry-run and SQL bind validation
         run: node test/cron.dryrun.mjs
@@ -49,6 +51,9 @@ jobs:
       - name: Queue scanner safety tests
         run: node test/queue.test.mjs
 
+      - name: Queue starter runtime regression
+        run: node test/queue.runtime.mjs
+
       - name: Queue schema additive proof
         run: python3 test/queue_schema.py
 
@@ -62,4 +67,4 @@ jobs:
 
       - name: Ensure no generated Worker remains
         if: always()
-        run: rm -f src/index.build.js
+        run: rm -f src/index.build.js src/queue-worker.build.js
