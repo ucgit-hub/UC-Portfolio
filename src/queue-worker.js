@@ -80,6 +80,17 @@ async function startQueuedRefresh(env, { dryRun, source }) {
        AND created_at < datetime('now', ?)`
   ).bind(`-${ACTIVE_SCAN_MAX_AGE_MIN} minutes`).run();
 
+  // Keep one week of operational scan audit while bounding staging growth.
+  await env.DB.prepare(
+    `DELETE FROM scan_staging WHERE run_id IN (
+       SELECT run_id FROM scan_runs WHERE created_at < datetime('now','-7 days')
+         AND status IN ('COMPLETE','INCOMPLETE','DRY_COMPLETE','DRY_INCOMPLETE','FAILED'))`
+  ).run();
+  await env.DB.prepare(
+    `DELETE FROM scan_runs WHERE created_at < datetime('now','-7 days')
+       AND status IN ('COMPLETE','INCOMPLETE','DRY_COMPLETE','DRY_INCOMPLETE','FAILED')`
+  ).run();
+
   const [fundR, watchR, holdingsR] = await Promise.all([
     env.DB.prepare(
       `SELECT f.symbol,f.roe,f.de,f.mcap,f.crar,f.gross_npa,f.net_npa,n.industry,
@@ -407,7 +418,7 @@ async function finalizeRun(env, body) {
     const pyramidStatus = universeComplete ? py.pyramid_eligibility : "BLOCKED_SCAN_INCOMPLETE";
     const timeCheck = universeComplete ? tp.time_check : null;
     const plan = { p, h, ind, portfolioRank, isBottom20, ls, state, deteriorationStreak,
-      stage, gb, py, pyramidStatus, rot, rotationStatus, timeCheck, cov, fundamentalsIncomplete };
+      stage, gb, py, pyramidStatus, rot, tp, rotationStatus, timeCheck, cov, fundamentalsIncomplete };
     holdingPlans.push(plan);
     holdingState.push({
       symbol: p.symbol, rank: portfolioRank, leader: state.leader_state,
@@ -469,7 +480,10 @@ async function finalizeRun(env, body) {
   }
 
   // Production writes start only here, after all network batches and final calculations completed.
-  await env.DB.prepare(
+  // D1 batch() is transactional: any statement failure rolls back the entire
+  // publication, so Queue retry cannot leave half-published portfolio state.
+  const tx = [];
+  tx.push(env.DB.prepare(
     `INSERT INTO macro_state (id,brent_price,vix,vix_change,nifty_close,nifty_50dma,nifty_200dma,
        nifty500_close,breadth_pct,midcap_rs_20d,midcaps_outperforming,
        regime,regime_rationale,regime_missing_inputs,regime_fail_safe,
@@ -487,42 +501,33 @@ async function finalizeRun(env, body) {
     round(nifty200dma), bench500Close, breadthPct, mid.midcap_rs_20d,
     mid.midcaps_outperforming == null ? null : (mid.midcaps_outperforming ? 1 : 0),
     regime, reg.rationale, JSON.stringify(reg.missing_inputs),
-    reg.fail_safe ? 1 : 0, fiiFresh.fresh ? 1 : 0, fiiFresh.last_session).run();
+    reg.fail_safe ? 1 : 0, fiiFresh.fresh ? 1 : 0, fiiFresh.last_session));
 
-  // Fresh holding indicators are always safe to persist; they are price-derived state, not broker state.
+  // Fresh holding indicators are price-derived state, never broker/execution state.
   for (const p of ranked) {
     const u = uniRank.get(p.symbol);
-    await upsertIndicator(env.DB, p.symbol, p.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null);
+    tx.push(indicatorStatement(env.DB, p.symbol, p.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null));
   }
 
   if (universeComplete) {
     for (const r of stagedGood) {
       const u = uniRank.get(r.symbol);
-      await upsertIndicator(env.DB, r.symbol, r.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null);
+      tx.push(indicatorStatement(env.DB, r.symbol, r.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null));
       if (r.is_watch === 1) {
-        await env.DB.prepare("UPDATE watchlist SET momentum_score=?,updated_at=datetime('now') WHERE symbol=?")
-          .bind(r.ind.momentum_score, r.symbol).run();
+        tx.push(env.DB.prepare("UPDATE watchlist SET momentum_score=?,updated_at=datetime('now') WHERE symbol=?")
+          .bind(r.ind.momentum_score, r.symbol));
       }
     }
-    for (const u of universeRanked) {
-      await env.DB.prepare("UPDATE indicators SET universe_rank=?,universe_rank_pct=? WHERE symbol=?")
-        .bind(u.universe_rank, u.universe_rank_pct, u.symbol).run();
-    }
-    for (const x of evaluatedCandidates) {
-      await upsertOpportunity(env.DB, x, holdingSymbols, holdings);
-    }
+    for (const x of evaluatedCandidates) tx.push(opportunityStatement(env.DB, x, holdingSymbols, holdings));
   }
 
   for (const x of holdingPlans) {
-    await writeHoldingPlan(env.DB, x);
-    await writeHoldingAlerts(env.DB, x, universeComplete);
-  }
-  for (const p of perHolding.filter(x => !x.ind)) {
-    await raiseAlert(env.DB, "DATA_STALE", p.symbol, "CRITICAL", "Price data unavailable — indicators stale, manual check required");
+    tx.push(holdingPlanStatement(env.DB, x));
+    tx.push(...holdingAlertStatements(env.DB, x, universeComplete));
   }
 
   // UPSERT preserves legacy columns (including nifty_return_pct) while updating v1.1-owned fields.
-  await env.DB.prepare(
+  tx.push(env.DB.prepare(
     `INSERT INTO daily_nav (date,equity_value,liquidbees_value,cash_kite,cash_bank,
       net_worth,nifty_close,portfolio_return_pct,positions_count,cash_ratio_pct,
       nifty50_close,nifty500_close,vix_close,brent_close,day_change_pct,day_change_abs,
@@ -543,22 +548,24 @@ async function finalizeRun(env, body) {
     cap.net_worth, niftyClose, round((cap.net_worth / baseline - 1) * 100), holdings.length,
     cap.liquidity_pct, niftyClose, bench500Close, vixVal, prevMacro?.brent_price ?? null,
     prevNav?.net_worth ? round((dayChange / prevNav.net_worth) * 100) : 0, round(dayChange, 0),
-    cap.liquidity_pct, liq.target_low, liq.target_high, liq.status, regime).run();
+    cap.liquidity_pct, liq.target_low, liq.target_high, liq.status, regime));
 
   if (universeComplete) {
-    await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('last_scan_date',?)")
-      .bind(new Date().toISOString()).run();
-    await env.DB.prepare("DELETE FROM opportunities WHERE scan_date<date('now','-14 days')").run();
+    tx.push(env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('last_scan_date',?)")
+      .bind(new Date().toISOString()));
+    tx.push(env.DB.prepare("DELETE FROM opportunities WHERE scan_date<date('now','-14 days')"));
   }
-  await env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('version',?)").bind(VERSION).run();
+  tx.push(env.DB.prepare("INSERT OR REPLACE INTO config (key,value) VALUES ('version',?)").bind(VERSION));
 
   const status = universeComplete ? "COMPLETE" : "INCOMPLETE";
-  await env.DB.prepare(
+  tx.push(env.DB.prepare(
     `UPDATE scan_runs SET status=?,regime=?,successful_items=?,failed_items=?,buy_candidates=?,
      summary_json=?,errors_json=?,finished_at=datetime('now'),updated_at=datetime('now'),last_error=NULL
      WHERE run_id=?`
   ).bind(status, regime, stagedGood.length, stagedErrors.length, buyCandidates,
-    JSON.stringify(summary), JSON.stringify(dataErrors), runId).run();
+    JSON.stringify(summary), JSON.stringify(dataErrors), runId));
+
+  await env.DB.batch(tx);
 }
 
 async function handleQueuedScanStatus(url, env) {
@@ -593,9 +600,9 @@ async function handleQueuedScanStatus(url, env) {
   });
 }
 
-async function writeHoldingPlan(DB, x) {
+function holdingPlanStatement(DB, x) {
   const { p,h,ind,portfolioRank,isBottom20,ls,state,deteriorationStreak,stage,gb,pyramidStatus,rotationStatus,timeCheck,cov,fundamentalsIncomplete } = x;
-  await DB.prepare(
+  return DB.prepare(
     `UPDATE holdings SET momentum_score=?,momentum_rank=?,is_bottom_20=?,
       highest_close=?,highest_close_date=COALESCE(?,highest_close_date),
       leader_score=?,leader_state=?,leader_streak=?,deterioration_streak=?,
@@ -609,27 +616,29 @@ async function writeHoldingPlan(DB, x) {
     ind.rs_20d, ind.rs_60d, gb.giveback_alert,
     pyramidStatus, rotationStatus, timeCheck,
     JSON.stringify(cov.coverage_alerts),
-    fundamentalsIncomplete ? "FUNDAMENTALS_DATA_INCOMPLETE" : "OK", p.symbol).run();
+    fundamentalsIncomplete ? "FUNDAMENTALS_DATA_INCOMPLETE" : "OK", p.symbol);
 }
 
-async function writeHoldingAlerts(DB, x, universeComplete) {
-  const { p,stage,gb,rot,timeCheck,cov,fundamentalsIncomplete } = x;
+function holdingAlertStatements(DB, x, universeComplete) {
+  const { p,stage,gb,rot,tp,timeCheck,cov,fundamentalsIncomplete } = x;
+  const out = [];
   for (const a of cov.coverage_alerts) {
-    await raiseAlert(DB, "GTT_COVERAGE", p.symbol, a === "NO_GTT" ? "CRITICAL" : "WARNING", `GTT coverage: ${a}`);
+    out.push(alertStatement(DB, "GTT_COVERAGE", p.symbol, a === "NO_GTT" ? "CRITICAL" : "WARNING", `GTT coverage: ${a}`));
   }
-  if (gb.giveback_alert) await raiseAlert(DB, "GIVEBACK", p.symbol, "WARNING", `Giveback review: ${(gb.giveback_reasons || []).join("; ")}`);
-  if (stage?.stage_advanced) await raiseAlert(DB, "GTT_STAGE", p.symbol, "INFO", `GTT stage advanced to ${stage.gtt_stage} — raise stop to ${stage.min_stop} (limit ${stage.limit_price})`);
+  if (gb.giveback_alert) out.push(alertStatement(DB, "GIVEBACK", p.symbol, "WARNING", `Giveback review: ${(gb.giveback_reasons || []).join("; ")}`));
+  if (stage?.stage_advanced) out.push(alertStatement(DB, "GTT_STAGE", p.symbol, "INFO", `GTT stage advanced to ${stage.gtt_stage} — raise stop to ${stage.min_stop} (limit ${stage.limit_price})`));
   if (universeComplete && rot.rotation_status === "ROTATION_REVIEW_ELIGIBLE") {
-    await raiseAlert(DB, "ROTATION_REVIEW", p.symbol, "WARNING", `Rotation REVIEW: ${rot.deterioration_signals} deterioration signals — requires superior replacement + approval`);
+    out.push(alertStatement(DB, "ROTATION_REVIEW", p.symbol, "WARNING", `Rotation REVIEW: ${rot.deterioration_signals} deterioration signals — requires superior replacement + approval`));
   }
-  if (timeCheck) await raiseAlert(DB, "TIME_REVIEW", p.symbol, "INFO", `${timeCheck}`);
-  if (fundamentalsIncomplete) await raiseAlert(DB, "FUNDAMENTALS_INCOMPLETE", p.symbol, "INFO",
-    "FUNDAMENTALS_DATA_INCOMPLETE — existing holding: protection retained, no forced exit, pyramiding barred until a fresh Screener export revalidates it");
+  if (timeCheck) out.push(alertStatement(DB, "TIME_REVIEW", p.symbol, "INFO", `Day ${tp?.day ?? "?"} ${timeCheck}`));
+  if (fundamentalsIncomplete) out.push(alertStatement(DB, "FUNDAMENTALS_INCOMPLETE", p.symbol, "INFO",
+    "FUNDAMENTALS_DATA_INCOMPLETE — existing holding: protection retained, no forced exit, pyramiding barred until a fresh Screener export revalidates it"));
+  return out;
 }
 
-async function upsertOpportunity(DB, x, holdingSymbols, holdings) {
+function opportunityStatement(DB, x, holdingSymbols, holdings) {
   const r = x.row, ind = x.ind, f = x.f;
-  await DB.prepare(
+  return DB.prepare(
     `INSERT INTO opportunities (symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,
        vol_1y_pct,momentum_score,rsi_14,mfi_14,rs_20d,rs_60d,traded_val_cr,vol_threshold_cr,
        band_used_pct,credit_test,filters_passed,failed_filters,verdict,is_holding,
@@ -652,7 +661,7 @@ async function upsertOpportunity(DB, x, holdingSymbols, holdings) {
     f.credit_test, f.filters_passed, JSON.stringify(f.failed_filters), x.verdict,
     holdingSymbols.has(r.symbol) ? 1 : 0,
     holdings.filter(h => h.sector === r.sector).length < 3 ? 1 : 0,
-    ind.data_sufficiency).run();
+    ind.data_sufficiency);
 }
 
 const INDICATOR_UPSERT = `INSERT INTO indicators
@@ -673,20 +682,20 @@ const INDICATOR_UPSERT = `INSERT INTO indicators
   data_sufficiency=excluded.data_sufficiency,universe_rank=excluded.universe_rank,
   universe_rank_pct=excluded.universe_rank_pct,updated_at=excluded.updated_at`;
 
-async function upsertIndicator(DB, symbol, r, universeRank, universeRankPct) {
+function indicatorStatement(DB, symbol, r, universeRank, universeRankPct) {
   return DB.prepare(INDICATOR_UPSERT).bind(
     symbol, r.ltp, r.dma_200, r.dma_20, r.high_52w, r.low_52w, r.dist_52w_pct,
     r.return_6m_pct, r.vol_1y_pct, r.momentum_score, r.rsi_14, r.mfi_14, r.atr_14,
     r.atr_pct, r.traded_val_cr, r.rs_20d, r.rs_60d,
     bit(r.above_200_dma), bit(r.above_20_dma), bit(r.higher_highs), bit(r.higher_lows),
     r.candles_n, r.data_sufficiency, universeRank, universeRankPct
-  ).run();
+  );
 }
 
-async function raiseAlert(DB, alertType, symbol, severity, message) {
-  await DB.prepare(
+function alertStatement(DB, alertType, symbol, severity, message) {
+  return DB.prepare(
     "INSERT INTO alerts (alert_type,symbol,severity,message,resolved,created_at) VALUES (?,?,?,?,0,datetime('now'))"
-  ).bind(alertType, symbol, severity, message).run();
+  ).bind(alertType, symbol, severity, message);
 }
 
 async function recordQueueError(env, body, error, attempts) {
