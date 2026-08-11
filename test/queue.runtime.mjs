@@ -10,7 +10,7 @@ class Stmt {
 }
 
 class FakeDB {
-  constructor() { this.stage=[]; this.runs=[]; }
+  constructor() { this.stage=[]; this.runs=[]; this.cleanup=0; }
   prepare(sql) { return new Stmt(this, sql); }
   async batch(stmts) { for (const s of stmts) await s.run(); return []; }
   first(sql) {
@@ -37,8 +37,16 @@ class FakeDB {
   }
   run(sql, args) {
     if (sql.includes('stale active run superseded')) return {meta:{changes:0}};
+    if (sql.includes('DELETE FROM scan_staging') || sql.includes('DELETE FROM scan_runs')) {
+      this.cleanup++;
+      return {meta:{changes:0}};
+    }
     if (sql.includes('INSERT INTO scan_runs')) { this.runs.push(args); return {meta:{changes:1}}; }
-    if (sql.includes('INSERT INTO scan_staging')) { this.stage.push(args); return {meta:{changes:1}}; }
+    if (sql.includes('INSERT INTO scan_staging')) {
+      const payload = JSON.parse(args[0]);
+      this.stage.push(...payload);
+      return {meta:{changes:payload.length}};
+    }
     if (sql.includes("UPDATE scan_runs SET status='SCANNING'")) return {meta:{changes:1}};
     if (sql.includes("UPDATE scan_runs SET status='FAILED'")) return {meta:{changes:1}};
     throw new Error(`Unhandled run(): ${sql}`);
@@ -57,8 +65,10 @@ assert.equal(out.batchCount,3);
 assert.equal(sent.length,3);
 assert.ok(sent.every(m => m.body.symbols.length <= 10));
 assert.equal(db.stage.length,23);
-assert.ok(!db.stage.some(args => args[1] === 'C0' || args[1] === 'C1'));
-assert.ok(db.stage.some(args => args[1] === 'W1'));
+assert.ok(!db.stage.some(row => row.symbol === 'C0' || row.symbol === 'C1'));
+assert.ok(db.stage.some(row => row.symbol === 'W1'));
+assert.ok(db.stage.find(row => row.symbol === 'C2')?.is_watch === 1);
+assert.equal(db.cleanup,2);
 assert.match(out.note,/operational state/);
 
 console.log('QUEUE RUNTIME START PASS');
