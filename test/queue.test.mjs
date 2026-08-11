@@ -41,9 +41,17 @@ t('queue retries transient fetch failures',()=>{
   assert.match(src,/isRetryableFetchError/);
   assert.match(src,/msg\.retry\(/);
 });
-t('production publication is one transactional D1 batch',()=>{
+t('production publication is atomic and bounded for D1 Free',()=>{
   assert.match(src,/const tx = \[\]/);
   assert.match(src,/await env\.DB\.batch\(tx\)/);
+  assert.match(src,/publication_query_budget_exceeded/);
+  assert.match(src,/json_each\(\?\)/);
+  assert.match(src,/json_each\(\?1\)/);
+});
+t('starter bulk-loads staging in one D1 statement',()=>{
+  assert.match(src,/const stagingPayload/);
+  assert.match(src,/FROM json_each\(\?\)/);
+  assert.ok(!src.includes('env.DB.batch(statements)'));
 });
 t('scan status reports progress and summary',()=>{
   assert.match(src,/progressPct/);
