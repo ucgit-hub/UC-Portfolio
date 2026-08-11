@@ -141,13 +141,19 @@ async function startQueuedRefresh(env, { dryRun, source }) {
      VALUES (?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`
   ).bind(runId, VERSION, dryRun ? 1 : 0, source, "QUEUED", items.length, eligibleUniverse, batches.length).run();
 
-  const statements = items.map(x => env.DB.prepare(
+  // One JSON-expanded D1 statement keeps the starter safely below the Free-plan
+  // D1 query/subrequest budget even when the universe contains 100+ symbols.
+  const stagingPayload = items.map(x => ({ run_id: runId, ...x }));
+  await env.DB.prepare(
     `INSERT INTO scan_staging
        (run_id,symbol,sector,roe,de,mcap,crar,gross_npa,net_npa,in_nifty100,is_candidate,is_watch)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).bind(runId, x.symbol, x.sector, x.roe, x.de, x.mcap, x.crar, x.gross_npa, x.net_npa,
-    x.in_nifty100, x.is_candidate, x.is_watch));
-  await env.DB.batch(statements);
+     SELECT
+       json_extract(value,'$.run_id'),json_extract(value,'$.symbol'),json_extract(value,'$.sector'),
+       json_extract(value,'$.roe'),json_extract(value,'$.de'),json_extract(value,'$.mcap'),
+       json_extract(value,'$.crar'),json_extract(value,'$.gross_npa'),json_extract(value,'$.net_npa'),
+       json_extract(value,'$.in_nifty100'),json_extract(value,'$.is_candidate'),json_extract(value,'$.is_watch')
+     FROM json_each(?)`
+  ).bind(JSON.stringify(stagingPayload)).run();
 
   try {
     await env.SCAN_QUEUE.sendBatch(batches.map((symbols, i) => ({ body: {
@@ -480,8 +486,10 @@ async function finalizeRun(env, body) {
   }
 
   // Production writes start only here, after all network batches and final calculations completed.
-  // D1 batch() is transactional: any statement failure rolls back the entire
-  // publication, so Queue retry cannot leave half-published portfolio state.
+  // Keep BOTH external fetches and D1 query count comfortably below Workers Free limits.
+  // Large row sets are expanded from JSON inside D1, so this publication is ~11 SQL
+  // statements regardless of universe size. D1 batch() is transactional: any statement
+  // failure rolls back the entire publication.
   const tx = [];
   tx.push(env.DB.prepare(
     `INSERT INTO macro_state (id,brent_price,vix,vix_change,nifty_close,nifty_50dma,nifty_200dma,
@@ -503,28 +511,33 @@ async function finalizeRun(env, body) {
     regime, reg.rationale, JSON.stringify(reg.missing_inputs),
     reg.fail_safe ? 1 : 0, fiiFresh.fresh ? 1 : 0, fiiFresh.last_session));
 
-  // Fresh holding indicators are price-derived state, never broker/execution state.
-  for (const p of ranked) {
+  // One bulk indicator UPSERT covers holdings plus the full completed universe.
+  const indicatorRows = ranked.map(p => {
     const u = uniRank.get(p.symbol);
-    tx.push(indicatorStatement(env.DB, p.symbol, p.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null));
-  }
-
+    return indicatorPayload(p.symbol, p.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null);
+  });
   if (universeComplete) {
     for (const r of stagedGood) {
       const u = uniRank.get(r.symbol);
-      tx.push(indicatorStatement(env.DB, r.symbol, r.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null));
-      if (r.is_watch === 1) {
-        tx.push(env.DB.prepare("UPDATE watchlist SET momentum_score=?,updated_at=datetime('now') WHERE symbol=?")
-          .bind(r.ind.momentum_score, r.symbol));
-      }
+      indicatorRows.push(indicatorPayload(r.symbol, r.ind, u?.universe_rank ?? null, u?.universe_rank_pct ?? null));
     }
-    for (const x of evaluatedCandidates) tx.push(opportunityStatement(env.DB, x, holdingSymbols, holdings));
+  }
+  if (indicatorRows.length) tx.push(bulkIndicatorStatement(env.DB, indicatorRows));
+
+  if (universeComplete) {
+    const watchRows = stagedGood.filter(r => r.is_watch === 1)
+      .map(r => ({ symbol: r.symbol, momentum_score: r.ind.momentum_score }));
+    if (watchRows.length) tx.push(bulkWatchlistStatement(env.DB, watchRows));
+
+    const opportunityRows = evaluatedCandidates.map(x => opportunityPayload(x, holdingSymbols, holdings));
+    if (opportunityRows.length) tx.push(bulkOpportunityStatement(env.DB, opportunityRows));
   }
 
-  for (const x of holdingPlans) {
-    tx.push(holdingPlanStatement(env.DB, x));
-    tx.push(...holdingAlertStatements(env.DB, x, universeComplete));
-  }
+  const holdingRows = holdingPlans.map(holdingPayload);
+  if (holdingRows.length) tx.push(bulkHoldingStatement(env.DB, holdingRows));
+
+  const alertRows = holdingPlans.flatMap(x => holdingAlertPayloads(x, universeComplete));
+  if (alertRows.length) tx.push(bulkAlertStatement(env.DB, alertRows));
 
   // UPSERT preserves legacy columns (including nifty_return_pct) while updating v1.1-owned fields.
   tx.push(env.DB.prepare(
@@ -565,6 +578,9 @@ async function finalizeRun(env, body) {
   ).bind(status, regime, stagedGood.length, stagedErrors.length, buyCandidates,
     JSON.stringify(summary), JSON.stringify(dataErrors), runId));
 
+  // Max fixed SQL count is 11 (usually 9-10), safely below D1 Free's 50-query
+  // per-invocation ceiling even if a batch statement is counted per SQL query.
+  if (tx.length > 12) throw new Error(`publication_query_budget_exceeded:${tx.length}`);
   await env.DB.batch(tx);
 }
 
@@ -600,50 +616,132 @@ async function handleQueuedScanStatus(url, env) {
   });
 }
 
-function holdingPlanStatement(DB, x) {
+function holdingPayload(x) {
   const { p,h,ind,portfolioRank,isBottom20,ls,state,deteriorationStreak,stage,gb,pyramidStatus,rotationStatus,timeCheck,cov,fundamentalsIncomplete } = x;
-  return DB.prepare(
-    `UPDATE holdings SET momentum_score=?,momentum_rank=?,is_bottom_20=?,
-      highest_close=?,highest_close_date=COALESCE(?,highest_close_date),
-      leader_score=?,leader_state=?,leader_streak=?,deterioration_streak=?,
-      gtt_stage=?,gtt_min_stop=?,atr_pct=?,rs_20d=?,rs_60d=?,
-      giveback_alert=?,pyramid_eligibility=?,rotation_status=?,time_check=?,
-      coverage_alerts=?,fundamentals_status=?,last_audit=datetime('now') WHERE symbol=?`
-  ).bind(ind.momentum_score, portfolioRank, isBottom20 ? 1 : 0,
-    p.hc.highest_close, p.hc.highest_close_date,
-    ls.leader_score, state.leader_state, state.leader_streak, deteriorationStreak,
-    stage?.gtt_stage ?? h.gtt_stage, stage?.min_stop ?? null, ind.atr_pct,
-    ind.rs_20d, ind.rs_60d, gb.giveback_alert,
-    pyramidStatus, rotationStatus, timeCheck,
-    JSON.stringify(cov.coverage_alerts),
-    fundamentalsIncomplete ? "FUNDAMENTALS_DATA_INCOMPLETE" : "OK", p.symbol);
+  return {
+    symbol: p.symbol,
+    momentum_score: ind.momentum_score, momentum_rank: portfolioRank, is_bottom_20: isBottom20 ? 1 : 0,
+    highest_close: p.hc.highest_close, highest_close_date: p.hc.highest_close_date,
+    leader_score: ls.leader_score, leader_state: state.leader_state, leader_streak: state.leader_streak,
+    deterioration_streak: deteriorationStreak, gtt_stage: stage?.gtt_stage ?? h.gtt_stage,
+    gtt_min_stop: stage?.min_stop ?? null, atr_pct: ind.atr_pct, rs_20d: ind.rs_20d, rs_60d: ind.rs_60d,
+    giveback_alert: gb.giveback_alert, pyramid_eligibility: pyramidStatus,
+    rotation_status: rotationStatus, time_check: timeCheck,
+    coverage_alerts: JSON.stringify(cov.coverage_alerts),
+    fundamentals_status: fundamentalsIncomplete ? "FUNDAMENTALS_DATA_INCOMPLETE" : "OK",
+  };
 }
 
-function holdingAlertStatements(DB, x, universeComplete) {
+function bulkHoldingStatement(DB, rows) {
+  return DB.prepare(
+    `WITH src AS (
+       SELECT json_extract(value,'$.symbol') AS symbol,
+              json_extract(value,'$.momentum_score') AS momentum_score,
+              json_extract(value,'$.momentum_rank') AS momentum_rank,
+              json_extract(value,'$.is_bottom_20') AS is_bottom_20,
+              json_extract(value,'$.highest_close') AS highest_close,
+              json_extract(value,'$.highest_close_date') AS highest_close_date,
+              json_extract(value,'$.leader_score') AS leader_score,
+              json_extract(value,'$.leader_state') AS leader_state,
+              json_extract(value,'$.leader_streak') AS leader_streak,
+              json_extract(value,'$.deterioration_streak') AS deterioration_streak,
+              json_extract(value,'$.gtt_stage') AS gtt_stage,
+              json_extract(value,'$.gtt_min_stop') AS gtt_min_stop,
+              json_extract(value,'$.atr_pct') AS atr_pct,
+              json_extract(value,'$.rs_20d') AS rs_20d,
+              json_extract(value,'$.rs_60d') AS rs_60d,
+              json_extract(value,'$.giveback_alert') AS giveback_alert,
+              json_extract(value,'$.pyramid_eligibility') AS pyramid_eligibility,
+              json_extract(value,'$.rotation_status') AS rotation_status,
+              json_extract(value,'$.time_check') AS time_check,
+              json_extract(value,'$.coverage_alerts') AS coverage_alerts,
+              json_extract(value,'$.fundamentals_status') AS fundamentals_status
+       FROM json_each(?1)
+     )
+     UPDATE holdings SET
+       momentum_score=(SELECT momentum_score FROM src WHERE src.symbol=holdings.symbol),
+       momentum_rank=(SELECT momentum_rank FROM src WHERE src.symbol=holdings.symbol),
+       is_bottom_20=(SELECT is_bottom_20 FROM src WHERE src.symbol=holdings.symbol),
+       highest_close=(SELECT highest_close FROM src WHERE src.symbol=holdings.symbol),
+       highest_close_date=COALESCE((SELECT highest_close_date FROM src WHERE src.symbol=holdings.symbol),highest_close_date),
+       leader_score=(SELECT leader_score FROM src WHERE src.symbol=holdings.symbol),
+       leader_state=(SELECT leader_state FROM src WHERE src.symbol=holdings.symbol),
+       leader_streak=(SELECT leader_streak FROM src WHERE src.symbol=holdings.symbol),
+       deterioration_streak=(SELECT deterioration_streak FROM src WHERE src.symbol=holdings.symbol),
+       gtt_stage=(SELECT gtt_stage FROM src WHERE src.symbol=holdings.symbol),
+       gtt_min_stop=(SELECT gtt_min_stop FROM src WHERE src.symbol=holdings.symbol),
+       atr_pct=(SELECT atr_pct FROM src WHERE src.symbol=holdings.symbol),
+       rs_20d=(SELECT rs_20d FROM src WHERE src.symbol=holdings.symbol),
+       rs_60d=(SELECT rs_60d FROM src WHERE src.symbol=holdings.symbol),
+       giveback_alert=(SELECT giveback_alert FROM src WHERE src.symbol=holdings.symbol),
+       pyramid_eligibility=(SELECT pyramid_eligibility FROM src WHERE src.symbol=holdings.symbol),
+       rotation_status=(SELECT rotation_status FROM src WHERE src.symbol=holdings.symbol),
+       time_check=(SELECT time_check FROM src WHERE src.symbol=holdings.symbol),
+       coverage_alerts=(SELECT coverage_alerts FROM src WHERE src.symbol=holdings.symbol),
+       fundamentals_status=(SELECT fundamentals_status FROM src WHERE src.symbol=holdings.symbol),
+       last_audit=datetime('now')
+     WHERE symbol IN (SELECT symbol FROM src)`
+  ).bind(JSON.stringify(rows));
+}
+
+function holdingAlertPayloads(x, universeComplete) {
   const { p,stage,gb,rot,tp,timeCheck,cov,fundamentalsIncomplete } = x;
   const out = [];
   for (const a of cov.coverage_alerts) {
-    out.push(alertStatement(DB, "GTT_COVERAGE", p.symbol, a === "NO_GTT" ? "CRITICAL" : "WARNING", `GTT coverage: ${a}`));
+    out.push({ alert_type:"GTT_COVERAGE", symbol:p.symbol, severity:a === "NO_GTT" ? "CRITICAL" : "WARNING", message:`GTT coverage: ${a}` });
   }
-  if (gb.giveback_alert) out.push(alertStatement(DB, "GIVEBACK", p.symbol, "WARNING", `Giveback review: ${(gb.giveback_reasons || []).join("; ")}`));
-  if (stage?.stage_advanced) out.push(alertStatement(DB, "GTT_STAGE", p.symbol, "INFO", `GTT stage advanced to ${stage.gtt_stage} — raise stop to ${stage.min_stop} (limit ${stage.limit_price})`));
+  if (gb.giveback_alert) out.push({ alert_type:"GIVEBACK", symbol:p.symbol, severity:"WARNING", message:`Giveback review: ${(gb.giveback_reasons || []).join("; ")}` });
+  if (stage?.stage_advanced) out.push({ alert_type:"GTT_STAGE", symbol:p.symbol, severity:"INFO", message:`GTT stage advanced to ${stage.gtt_stage} — raise stop to ${stage.min_stop} (limit ${stage.limit_price})` });
   if (universeComplete && rot.rotation_status === "ROTATION_REVIEW_ELIGIBLE") {
-    out.push(alertStatement(DB, "ROTATION_REVIEW", p.symbol, "WARNING", `Rotation REVIEW: ${rot.deterioration_signals} deterioration signals — requires superior replacement + approval`));
+    out.push({ alert_type:"ROTATION_REVIEW", symbol:p.symbol, severity:"WARNING", message:`Rotation REVIEW: ${rot.deterioration_signals} deterioration signals — requires superior replacement + approval` });
   }
-  if (timeCheck) out.push(alertStatement(DB, "TIME_REVIEW", p.symbol, "INFO", `Day ${tp?.day ?? "?"} ${timeCheck}`));
-  if (fundamentalsIncomplete) out.push(alertStatement(DB, "FUNDAMENTALS_INCOMPLETE", p.symbol, "INFO",
-    "FUNDAMENTALS_DATA_INCOMPLETE — existing holding: protection retained, no forced exit, pyramiding barred until a fresh Screener export revalidates it"));
+  if (timeCheck) out.push({ alert_type:"TIME_REVIEW", symbol:p.symbol, severity:"INFO", message:`Day ${tp?.day ?? "?"} ${timeCheck}` });
+  if (fundamentalsIncomplete) out.push({ alert_type:"FUNDAMENTALS_INCOMPLETE", symbol:p.symbol, severity:"INFO",
+    message:"FUNDAMENTALS_DATA_INCOMPLETE — existing holding: protection retained, no forced exit, pyramiding barred until a fresh Screener export revalidates it" });
   return out;
 }
 
-function opportunityStatement(DB, x, holdingSymbols, holdings) {
+function bulkAlertStatement(DB, rows) {
+  return DB.prepare(
+    `INSERT INTO alerts (alert_type,symbol,severity,message,resolved,created_at)
+     SELECT json_extract(value,'$.alert_type'),json_extract(value,'$.symbol'),
+            json_extract(value,'$.severity'),json_extract(value,'$.message'),0,datetime('now')
+     FROM json_each(?)`
+  ).bind(JSON.stringify(rows));
+}
+
+function opportunityPayload(x, holdingSymbols, holdings) {
   const r = x.row, ind = x.ind, f = x.f;
+  return {
+    symbol:r.symbol, sector:r.sector, roe:r.roe, de:r.de, mcap:r.mcap,
+    ltp:ind.ltp, dma_200:ind.dma_200, dist_52w_pct:ind.dist_52w_pct,
+    return_6m_pct:ind.return_6m_pct, vol_1y_pct:ind.vol_1y_pct,
+    momentum_score:ind.momentum_score, rsi_14:ind.rsi_14, mfi_14:ind.mfi_14,
+    rs_20d:ind.rs_20d, rs_60d:ind.rs_60d, traded_val_cr:ind.traded_val_cr,
+    vol_threshold_cr:f.vol_threshold_cr, band_used_pct:f.band_used_pct, credit_test:f.credit_test,
+    filters_passed:f.filters_passed, failed_filters:JSON.stringify(f.failed_filters), verdict:x.verdict,
+    is_holding:holdingSymbols.has(r.symbol) ? 1 : 0,
+    sector_slot_available:holdings.filter(h => h.sector === r.sector).length < 3 ? 1 : 0,
+    data_sufficiency:ind.data_sufficiency,
+  };
+}
+
+function bulkOpportunityStatement(DB, rows) {
   return DB.prepare(
     `INSERT INTO opportunities (symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,
        vol_1y_pct,momentum_score,rsi_14,mfi_14,rs_20d,rs_60d,traded_val_cr,vol_threshold_cr,
        band_used_pct,credit_test,filters_passed,failed_filters,verdict,is_holding,
        sector_slot_available,data_sufficiency,scan_date,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,date('now'),datetime('now'))
+     SELECT json_extract(value,'$.symbol'),json_extract(value,'$.sector'),json_extract(value,'$.roe'),
+       json_extract(value,'$.de'),json_extract(value,'$.mcap'),json_extract(value,'$.ltp'),
+       json_extract(value,'$.dma_200'),json_extract(value,'$.dist_52w_pct'),json_extract(value,'$.return_6m_pct'),
+       json_extract(value,'$.vol_1y_pct'),json_extract(value,'$.momentum_score'),json_extract(value,'$.rsi_14'),
+       json_extract(value,'$.mfi_14'),json_extract(value,'$.rs_20d'),json_extract(value,'$.rs_60d'),
+       json_extract(value,'$.traded_val_cr'),json_extract(value,'$.vol_threshold_cr'),json_extract(value,'$.band_used_pct'),
+       json_extract(value,'$.credit_test'),json_extract(value,'$.filters_passed'),json_extract(value,'$.failed_filters'),
+       json_extract(value,'$.verdict'),json_extract(value,'$.is_holding'),json_extract(value,'$.sector_slot_available'),
+       json_extract(value,'$.data_sufficiency'),date('now'),datetime('now')
+     FROM json_each(?) WHERE true
      ON CONFLICT(symbol) DO UPDATE SET
        sector=excluded.sector,roe=excluded.roe,de=excluded.de,mcap=excluded.mcap,
        ltp=excluded.ltp,dma_200=excluded.dma_200,dist_52w_pct=excluded.dist_52w_pct,
@@ -655,47 +753,65 @@ function opportunityStatement(DB, x, holdingSymbols, holdings) {
        failed_filters=excluded.failed_filters,verdict=excluded.verdict,is_holding=excluded.is_holding,
        sector_slot_available=excluded.sector_slot_available,data_sufficiency=excluded.data_sufficiency,
        scan_date=excluded.scan_date,updated_at=excluded.updated_at`
-  ).bind(r.symbol, r.sector, r.roe, r.de, r.mcap, ind.ltp, ind.dma_200, ind.dist_52w_pct,
-    ind.return_6m_pct, ind.vol_1y_pct, ind.momentum_score, ind.rsi_14, ind.mfi_14,
-    ind.rs_20d, ind.rs_60d, ind.traded_val_cr, f.vol_threshold_cr, f.band_used_pct,
-    f.credit_test, f.filters_passed, JSON.stringify(f.failed_filters), x.verdict,
-    holdingSymbols.has(r.symbol) ? 1 : 0,
-    holdings.filter(h => h.sector === r.sector).length < 3 ? 1 : 0,
-    ind.data_sufficiency);
+  ).bind(JSON.stringify(rows));
 }
 
-const INDICATOR_UPSERT = `INSERT INTO indicators
- (symbol,ltp,dma_200,dma_20,high_52w,low_52w,dist_52w_pct,return_6m_pct,vol_1y_pct,
-  momentum_score,rsi_14,mfi_14,atr_14,atr_pct,traded_val_cr,rs_20d,rs_60d,
-  above_200_dma,above_20_dma,higher_highs,higher_lows,candles_n,data_sufficiency,
-  universe_rank,universe_rank_pct,updated_at)
- VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
- ON CONFLICT(symbol) DO UPDATE SET
-  ltp=excluded.ltp,dma_200=excluded.dma_200,dma_20=excluded.dma_20,
-  high_52w=excluded.high_52w,low_52w=excluded.low_52w,dist_52w_pct=excluded.dist_52w_pct,
-  return_6m_pct=excluded.return_6m_pct,vol_1y_pct=excluded.vol_1y_pct,
-  momentum_score=excluded.momentum_score,rsi_14=excluded.rsi_14,mfi_14=excluded.mfi_14,
-  atr_14=excluded.atr_14,atr_pct=excluded.atr_pct,traded_val_cr=excluded.traded_val_cr,
-  rs_20d=excluded.rs_20d,rs_60d=excluded.rs_60d,above_200_dma=excluded.above_200_dma,
-  above_20_dma=excluded.above_20_dma,higher_highs=excluded.higher_highs,
-  higher_lows=excluded.higher_lows,candles_n=excluded.candles_n,
-  data_sufficiency=excluded.data_sufficiency,universe_rank=excluded.universe_rank,
-  universe_rank_pct=excluded.universe_rank_pct,updated_at=excluded.updated_at`;
-
-function indicatorStatement(DB, symbol, r, universeRank, universeRankPct) {
-  return DB.prepare(INDICATOR_UPSERT).bind(
-    symbol, r.ltp, r.dma_200, r.dma_20, r.high_52w, r.low_52w, r.dist_52w_pct,
-    r.return_6m_pct, r.vol_1y_pct, r.momentum_score, r.rsi_14, r.mfi_14, r.atr_14,
-    r.atr_pct, r.traded_val_cr, r.rs_20d, r.rs_60d,
-    bit(r.above_200_dma), bit(r.above_20_dma), bit(r.higher_highs), bit(r.higher_lows),
-    r.candles_n, r.data_sufficiency, universeRank, universeRankPct
-  );
+function indicatorPayload(symbol, r, universeRank, universeRankPct) {
+  return {
+    symbol, ltp:r.ltp, dma_200:r.dma_200, dma_20:r.dma_20, high_52w:r.high_52w, low_52w:r.low_52w,
+    dist_52w_pct:r.dist_52w_pct, return_6m_pct:r.return_6m_pct, vol_1y_pct:r.vol_1y_pct,
+    momentum_score:r.momentum_score, rsi_14:r.rsi_14, mfi_14:r.mfi_14, atr_14:r.atr_14,
+    atr_pct:r.atr_pct, traded_val_cr:r.traded_val_cr, rs_20d:r.rs_20d, rs_60d:r.rs_60d,
+    above_200_dma:bit(r.above_200_dma), above_20_dma:bit(r.above_20_dma),
+    higher_highs:bit(r.higher_highs), higher_lows:bit(r.higher_lows),
+    candles_n:r.candles_n, data_sufficiency:r.data_sufficiency,
+    universe_rank:universeRank, universe_rank_pct:universeRankPct,
+  };
 }
 
-function alertStatement(DB, alertType, symbol, severity, message) {
+function bulkIndicatorStatement(DB, rows) {
   return DB.prepare(
-    "INSERT INTO alerts (alert_type,symbol,severity,message,resolved,created_at) VALUES (?,?,?,?,0,datetime('now'))"
-  ).bind(alertType, symbol, severity, message);
+    `INSERT INTO indicators
+      (symbol,ltp,dma_200,dma_20,high_52w,low_52w,dist_52w_pct,return_6m_pct,vol_1y_pct,
+       momentum_score,rsi_14,mfi_14,atr_14,atr_pct,traded_val_cr,rs_20d,rs_60d,
+       above_200_dma,above_20_dma,higher_highs,higher_lows,candles_n,data_sufficiency,
+       universe_rank,universe_rank_pct,updated_at)
+     SELECT json_extract(value,'$.symbol'),json_extract(value,'$.ltp'),json_extract(value,'$.dma_200'),
+       json_extract(value,'$.dma_20'),json_extract(value,'$.high_52w'),json_extract(value,'$.low_52w'),
+       json_extract(value,'$.dist_52w_pct'),json_extract(value,'$.return_6m_pct'),json_extract(value,'$.vol_1y_pct'),
+       json_extract(value,'$.momentum_score'),json_extract(value,'$.rsi_14'),json_extract(value,'$.mfi_14'),
+       json_extract(value,'$.atr_14'),json_extract(value,'$.atr_pct'),json_extract(value,'$.traded_val_cr'),
+       json_extract(value,'$.rs_20d'),json_extract(value,'$.rs_60d'),json_extract(value,'$.above_200_dma'),
+       json_extract(value,'$.above_20_dma'),json_extract(value,'$.higher_highs'),json_extract(value,'$.higher_lows'),
+       json_extract(value,'$.candles_n'),json_extract(value,'$.data_sufficiency'),json_extract(value,'$.universe_rank'),
+       json_extract(value,'$.universe_rank_pct'),datetime('now')
+     FROM json_each(?) WHERE true
+     ON CONFLICT(symbol) DO UPDATE SET
+       ltp=excluded.ltp,dma_200=excluded.dma_200,dma_20=excluded.dma_20,
+       high_52w=excluded.high_52w,low_52w=excluded.low_52w,dist_52w_pct=excluded.dist_52w_pct,
+       return_6m_pct=excluded.return_6m_pct,vol_1y_pct=excluded.vol_1y_pct,
+       momentum_score=excluded.momentum_score,rsi_14=excluded.rsi_14,mfi_14=excluded.mfi_14,
+       atr_14=excluded.atr_14,atr_pct=excluded.atr_pct,traded_val_cr=excluded.traded_val_cr,
+       rs_20d=excluded.rs_20d,rs_60d=excluded.rs_60d,above_200_dma=excluded.above_200_dma,
+       above_20_dma=excluded.above_20_dma,higher_highs=excluded.higher_highs,higher_lows=excluded.higher_lows,
+       candles_n=excluded.candles_n,data_sufficiency=excluded.data_sufficiency,
+       universe_rank=excluded.universe_rank,universe_rank_pct=excluded.universe_rank_pct,
+       updated_at=excluded.updated_at`
+  ).bind(JSON.stringify(rows));
+}
+
+function bulkWatchlistStatement(DB, rows) {
+  return DB.prepare(
+    `WITH src AS (
+       SELECT json_extract(value,'$.symbol') AS symbol,
+              json_extract(value,'$.momentum_score') AS momentum_score
+       FROM json_each(?1)
+     )
+     UPDATE watchlist SET
+       momentum_score=(SELECT momentum_score FROM src WHERE src.symbol=watchlist.symbol),
+       updated_at=datetime('now')
+     WHERE symbol IN (SELECT symbol FROM src)`
+  ).bind(JSON.stringify(rows));
 }
 
 async function recordQueueError(env, body, error, attempts) {
