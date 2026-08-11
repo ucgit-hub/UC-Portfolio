@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release/uc-momentum-v1.1
+      - release/uc-momentum-v1.1.1-queue
   workflow_dispatch:
 
 permissions:
@@ -45,11 +46,19 @@ jobs:
       - name: Live-shape SQLite compatibility
         run: python3 test/live_hotfix_compat.py
 
+      - name: Queue scanner safety tests
+        run: node test/queue.test.mjs
+
+      - name: Queue schema additive proof
+        run: python3 test/queue_schema.py
+
       - name: Dashboard assertions
         run: node test/dashboard.test.mjs
 
-      - name: Worker syntax check
-        run: node --check src/index.js
+      - name: Worker syntax checks
+        run: |
+          node --check src/index.js
+          node --check src/queue-worker.js
 
       - name: Ensure no generated Worker remains
         if: always()
