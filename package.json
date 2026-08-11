@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "test:unit": "node test/unit.test.mjs",
     "test:preprod": "node test/preprod.test.mjs",
-    "test:freshness": "node test/freshness.test.mjs"
+    "test:freshness": "node test/freshness.test.mjs",
+    "test:queue": "node test/queue.test.mjs && python3 test/queue_schema.py"
   },
   "type": "module"
 }
