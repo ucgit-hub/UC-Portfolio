@@ -5,6 +5,9 @@ on:
     branches:
       - release/uc-momentum-v1.1
       - release/uc-momentum-v1.1.1-queue
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -56,6 +59,9 @@ jobs:
 
       - name: Queue schema additive proof
         run: python3 test/queue_schema.py
+
+      - name: Queue bulk SQL execution proof
+        run: python3 test/queue_sql.py
 
       - name: Dashboard assertions
         run: node test/dashboard.test.mjs
