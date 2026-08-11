@@ -41,6 +41,10 @@ t('queue retries transient fetch failures',()=>{
   assert.match(src,/isRetryableFetchError/);
   assert.match(src,/msg\.retry\(/);
 });
+t('production publication is one transactional D1 batch',()=>{
+  assert.match(src,/const tx = \[\]/);
+  assert.match(src,/await env\.DB\.batch\(tx\)/);
+});
 t('scan status reports progress and summary',()=>{
   assert.match(src,/progressPct/);
   assert.match(src,/summary: safeJson/);
