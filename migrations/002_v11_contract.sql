@@ -50,7 +50,9 @@ FROM macro_state;
 DROP TABLE macro_state;
 ALTER TABLE macro_state_v11_contract RENAME TO macro_state;
 
--- Remove the obsolete rank-only automatic replacement field.
+-- Remove the obsolete rank-only automatic replacement field. Universe ranking
+-- lives in indicators; opportunities never acquired a universe_rank column in
+-- the corrected 48-column EXPAND migration.
 CREATE TABLE opportunities_v11_contract (
   symbol TEXT PRIMARY KEY,
   sector TEXT,
@@ -77,7 +79,6 @@ CREATE TABLE opportunities_v11_contract (
   is_holding INTEGER DEFAULT 0,
   sector_slot_available INTEGER DEFAULT 1,
   data_sufficiency TEXT,
-  universe_rank INTEGER,
   scan_date TEXT,
   updated_at TEXT
 );
@@ -85,13 +86,13 @@ INSERT INTO opportunities_v11_contract (
   symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,vol_1y_pct,
   momentum_score,rsi_14,mfi_14,rs_20d,rs_60d,traded_val_cr,vol_threshold_cr,
   band_used_pct,credit_test,filters_passed,failed_filters,verdict,is_holding,
-  sector_slot_available,data_sufficiency,universe_rank,scan_date,updated_at
+  sector_slot_available,data_sufficiency,scan_date,updated_at
 )
 SELECT
   symbol,sector,roe,de,mcap,ltp,dma_200,dist_52w_pct,return_6m_pct,vol_1y_pct,
   momentum_score,rsi_14,mfi_14,rs_20d,rs_60d,traded_val_cr,vol_threshold_cr,
   band_used_pct,credit_test,filters_passed,failed_filters,verdict,is_holding,
-  sector_slot_available,data_sufficiency,universe_rank,scan_date,updated_at
+  sector_slot_available,data_sufficiency,scan_date,updated_at
 FROM opportunities;
 DROP TABLE opportunities;
 ALTER TABLE opportunities_v11_contract RENAME TO opportunities;
